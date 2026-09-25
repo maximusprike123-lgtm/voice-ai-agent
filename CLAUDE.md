@@ -63,6 +63,28 @@ owner via Telegram. No real calendar integration — the owner confirms manually
   the system prompt. No RAG — the FAQ is small and fixed.
 - **Bookings:** validated, then **written to SQLite before** the Telegram notification is
   sent, so nothing is lost if Telegram fails. The agent never confirms a time slot itself.
+  SQLite is also the outbox: every row has `notified_at` (NULL until the owner was told).
+  **Notifications never block the conversation:** `NotifyingSink` saves, returns the row id
+  at once, and one background worker sends to Telegram and then marks the row. Unnotified rows
+  are re-sent at startup and by a sweep every 5 minutes.
+  **Delivery is at-least-once, not exactly-once:** if the process dies (or the mark fails)
+  between a successful send and marking the row, the message is sent again on the next
+  start/sweep, so the owner may occasionally see a duplicate. Accepted on purpose: a duplicate
+  is harmless, a lost booking is not. Don't "fix" it without a plan for the lost-message case.
+- **Principle: code enforces guarantees, the LLM handles conversation.** Anything the business
+  relies on must not depend on the model obeying the prompt. Examples so far: booking data is
+  validated and normalized in code; a booking is saved only by `confirm_booking` after code
+  has read the draft back; the read-back text is built by code and spoken verbatim by the
+  engine (`ToolOutcome.say`), so its phone digits are always exactly the last 4 and its
+  numbers/dates/times are always in words; the model is never asked to say digits; an
+  approximate time cannot become an invented HH:MM because it goes into `preferred_period`.
+  When a live run shows the model slipping on something that matters, move it into code
+  rather than into more prompt text. The LLM keeps what is conversational: understanding the
+  caller, phrasing questions, answering FAQ.
+- **Knowledge:** `config/business.yaml` (hours, services, prices, FAQ) loaded straight into
+  the system prompt. No RAG — the FAQ is small and fixed.
+- **Bookings:** validated, then **written to SQLite before** the Telegram notification is
+  sent, so nothing is lost if Telegram fails. The agent never confirms a time slot itself.
   SQLite is also the outbox: every row has `notified_at` (NULL until the owner was told), so
   after a crash between save and Telegram the notifier re-sends whatever is still NULL.
 - **Scope:** inbound calls only, Russian only, no call transfer, no LangVerse code reused.
@@ -126,17 +148,39 @@ timestamp). Failures raise `StorageError`; the tools already turn that into an a
 (`data/agent.db`, gitignored) but nothing opens the database yet: the CLI (1.9) / call
 handler (step 3) will.
 
+1.8 (Telegram notifier, `src/agent/notifier.py`): `TelegramNotifier` (`sendMessage`, JSON
+`chat_id` + `text`, **no `parse_mode`** so caller text can never break a message; timeouts
+3s connect / 5s read+write; text capped at Telegram's 4096; control characters stripped;
+errors are `NotifyError(permanent, retry_after)`: 429 → transient with Telegram's
+`retry_after` (body or header), 5xx/timeouts/network/odd 200 → transient, other 4xx →
+permanent). `NotifyingSink` implements `RecordSink` over an outbox store (`SqliteSink`): save
+(a save failure propagates, nothing is sent) → enqueue → return id; a single worker keeps
+order and stays under Telegram's per-chat rate limit; retries: 5 attempts per record per round,
+backoff 1/2/4/8s (+-25% jitter, cap 30s), a 429 waits `retry_after`+0.5s, a `retry_after` over
+120s is left to the sweep; permanent errors are logged at ERROR and not retried; a record that
+fails its whole budget stays unnotified for the sweep; `start()` resends `list_unnotified()`
+then starts the worker and the 5-minute sweep; `aclose()` drains for up to 10s, then cancels
+(unsent rows stay in the DB). Message texts are built by `format_booking` /
+`format_message` (plain Russian text). **Token hygiene:** the bot token is in the request URL,
+so `NotifyError`s are raised outside `except` blocks (never chained to httpx errors) and httpx's
+own INFO log line ("HTTP Request: POST …/bot<TOKEN>/sendMessage") is redacted by a logging
+filter on the `httpx` logger — found by a test, it *did* leak the token at the default INFO
+level. `scripts/send_test_notification.py` sends one marked test message through the whole
+real path (temporary SQLite + `NotifyingSink` + Telegram). Nothing wires `NotifyingSink` into
+an app yet: the CLI (1.9) / call handler (step 3) will build store → notifier → sink and call
+`start()`/`aclose()`.
+
 Backend switch (after 1.6): main LLM is now OpenRouter DeepSeek (see Architecture);
 `check_llm.py` gained the token-based "no hidden reasoning" check (it fails if
 `reasoning_tokens > 0` or a one-word answer costs > 20 completion tokens; verified to FAIL with
 `LLM_REASONING_EFFORT=high`); `measure_ttft.py` skips its Ollama-only cold-start run on
 remote backends.
 
-**Next: 1.8 — Telegram notifier:** wraps `SqliteSink`: save first, then notify, then
-`mark_*_notified`; a startup/periodic retry of `list_unnotified()`.
+**Next: 1.9 — CLI** (text dialogue in the terminal: builds `SqliteSink` → `TelegramNotifier`
+→ `NotifyingSink`, `DialogueEngine`, `ToolRegistry`; handles empty LLM replies and short LLM
+timeouts).
 
-**Remaining roadmap (from the original plan):** 1.9 CLI ·
-1.10 tests incl. scripted scenario dialogues against the real LLM. Then step 2 (STT/TTS,
+**Remaining roadmap (from the original plan):** 1.10 tests incl. scripted scenario dialogues against the real LLM. Then step 2 (STT/TTS,
 local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 
 ## Known open issues
@@ -174,6 +218,16 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   waiting for the caller's goodbye. The early hang-up is now blocked in code (see the
   `end_call` guard); the time re-ask is left to the 1.10 scenario tests. One run is not reliability: 1.10 scenario tests
   must run several times and assert on tool arguments and on the spoken read-back.
+- **Telegram permanent failure = silent pile-up.** If Telegram fails permanently (bad token,
+  bot blocked, chat not found), bookings pile up unnotified and the owner doesn't know
+  (the only trace is an ERROR log line). Before real customers: add a second alert channel
+  (e.g. alert me if unnotified records are older than 30 minutes).
+- **Telegram live test not yet delivered (as of 1.8).** `send_test_notification.py` got
+  `400 chat not found`: the token is valid (bot `@voise_demo_agent_bot`) but no chat has ever
+  contacted the bot (0 updates), and a bot cannot message a user who hasn't started it. The
+  owner must open the bot in Telegram and press Start (or send any message), then re-run the
+  script; if it still fails, `TELEGRAM_CHAT_ID` is wrong. This is also the exact scenario of
+  the item above, and it behaved as designed (permanent error, no retry, row stays unnotified).
 - **Empty model reply:** seen once (qwen3.5:4b, turn 2 of a conversation): the LLM returned
   no text and no tool call, so `DialogueEngine.respond()` yields no events and the caller
   would hear silence. Decide handling (retry / fallback phrase) in 1.9 or 1.10.
@@ -192,4 +246,5 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
                                           # parse? TTFT?
 .venv/bin/python scripts/measure_ttft.py  # real prompt through DialogueEngine: cold/warm TTFT
 .venv/bin/python scripts/live_booking_dialogue.py  # scripted caller books via the real LLM + tools
+.venv/bin/python scripts/send_test_notification.py  # ONE real test message to the owner's Telegram
 ```
