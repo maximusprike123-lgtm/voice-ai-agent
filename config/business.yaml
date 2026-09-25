@@ -1,0 +1,56 @@
+# PLACEHOLDER DATA — replace with the real detailing center's information.
+# Times must be quoted ("10:00"); use null for a closed day. Prices are in rubles.
+
+name: "Детейлинг-центр «Пример»"
+address: "Москва, улица Примерная, дом 1"
+directions: "Въезд со двора, ворота с вывеской, парковка для клиентов у бокса."
+greeting: "Здравствуйте! Детейлинг-центр «Пример». Чем могу помочь?"
+
+hours:
+  mon: { open: "10:00", close: "21:00" }
+  tue: { open: "10:00", close: "21:00" }
+  wed: { open: "10:00", close: "21:00" }
+  thu: { open: "10:00", close: "21:00" }
+  fri: { open: "10:00", close: "21:00" }
+  sat: { open: "10:00", close: "20:00" }
+  sun: null
+
+services:
+  - id: detailing_wash
+    name: "Детейлинг-мойка"
+    description: "Двухфазная мойка кузова, очистка дисков, сушка."
+    price_from: 3000
+    price_to: 5000
+    duration: "1,5–2 часа"
+  - id: polishing
+    name: "Полировка кузова"
+    description: "Восстановительная полировка, удаление мелких царапин и голограмм."
+    price_from: 15000
+    price_to: 35000
+    duration: "1–2 дня"
+  - id: ceramic_coating
+    name: "Керамическое покрытие"
+    description: "Защитное покрытие кузова после подготовки и полировки."
+    price_from: 25000
+    duration: "2–3 дня"
+  - id: interior_cleaning
+    name: "Химчистка салона"
+    description: "Комплексная чистка сидений, потолка, ковров и пластика."
+    price_from: 10000
+    price_to: 18000
+    duration: "5–8 часов"
+  - id: ppf
+    name: "Оклейка защитной плёнкой"
+    description: "Полиуретановая плёнка на отдельные элементы или весь кузов."
+    price_from: 20000
+    duration: "от 1 до 4 дней"
+
+faq:
+  - question: "Можно ли оставить машину на ночь?"
+    answer: "Да, у нас охраняемый тёплый бокс, машину можно оставить на время работ."
+  - question: "Какие способы оплаты?"
+    answer: "Наличные, банковская карта и перевод по счёту для юридических лиц."
+  - question: "Почему цена указана диапазоном?"
+    answer: "Итоговая стоимость зависит от размера и состояния автомобиля; мастер называет точную цену после осмотра."
+
+extra_rules: []
