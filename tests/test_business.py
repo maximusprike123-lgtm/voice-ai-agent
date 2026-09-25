@@ -74,6 +74,12 @@ def test_duplicate_service_ids_are_rejected(tmp_path):
         load_business_config(write(tmp_path, text))
 
 
+def test_reserved_service_id_other_is_rejected(tmp_path):
+    text = VALID_YAML + '  - { id: other, name: "Прочее", price_from: 1000 }\n'
+    with pytest.raises(BusinessConfigError, match="'other' is reserved"):
+        load_business_config(write(tmp_path, text))
+
+
 def test_unknown_field_is_rejected(tmp_path):
     with pytest.raises(BusinessConfigError, match="phone_number"):
         load_business_config(write(tmp_path, VALID_YAML + 'phone_number: "+7"\n'))

@@ -8,6 +8,9 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+# Service id the booking tool uses for "something not on the list / consultation".
+OTHER_SERVICE_ID = "other"
+
 
 class BusinessConfigError(Exception):
     """Raised when business.yaml is missing, unparsable or invalid."""
@@ -90,6 +93,11 @@ class BusinessConfig(_Model):
         if all(hours is None for hours in self.hours.values()):
             raise ValueError("hours: the business must be open at least one day")
         ids = [service.id for service in self.services]
+        if OTHER_SERVICE_ID in ids:
+            raise ValueError(
+                f"services: the id {OTHER_SERVICE_ID!r} is reserved (the booking tool uses it "
+                "for requests that match no listed service); pick a different id"
+            )
         duplicates = sorted({i for i in ids if ids.count(i) > 1})
         if duplicates:
             raise ValueError(f"services: duplicate ids {duplicates}")

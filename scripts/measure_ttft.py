@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -227,7 +228,10 @@ async def main() -> int:
 
     # 1. Cold start.
     root_url = settings.llm_base_url.removesuffix("/v1")
-    if await unload_model(root_url, settings.llm_model):
+    is_local = urlparse(settings.llm_base_url).hostname in ("localhost", "127.0.0.1", "::1")
+    if not is_local:
+        print("(remote backend: skipping the Ollama-only cold-start run)")
+    elif await unload_model(root_url, settings.llm_model):
         cold = await run_turn(new_engine(now), timed, QUESTIONS[0])
         report("cold (model just unloaded)", [cold], QUESTIONS[:1])
 

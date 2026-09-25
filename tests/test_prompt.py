@@ -105,6 +105,14 @@ def test_static_part_holds_all_business_knowledge_and_nothing_per_call(business)
         assert per_call in volatile
 
 
+def test_static_part_explains_other_service_and_approximate_time(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "service_id other" in static
+    assert "не придумывай точное время" in static
+    assert "preferred_time" in static and "notes" in static
+    assert "ОШИБКА" in static
+
+
 def test_naive_datetime_is_rejected(business):
     with pytest.raises(ValueError, match="timezone-aware"):
         build_system_prompt(business, datetime(2026, 9, 24, 17, 5))

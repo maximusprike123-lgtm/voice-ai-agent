@@ -5,8 +5,9 @@ the backend, model or LLM_REASONING_EFFORT changes:
 
     .venv/bin/python scripts/check_llm.py
 
-It checks three things a voice agent depends on:
-  1. Thinking is actually disabled (no reasoning text, no runaway token count).
+It checks what a voice agent depends on:
+  1. Thinking is actually disabled: no reasoning text leaks, AND the backend's own token
+     accounting shows no hidden reasoning (see check_reasoning_tokens).
   2. Tool calling works and produces arguments we can parse.
   3. Time to first token is low enough for a phone call.
 """
@@ -16,6 +17,8 @@ import json
 import sys
 import time
 from pathlib import Path
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -31,6 +34,8 @@ from agent.llm import (  # noqa: E402
 from agent.settings import get_settings  # noqa: E402
 
 LATENCY_WARN_SECONDS = 1.5  # rough phone-call budget for time to first token
+# A one-word answer that costs more completion tokens than this means hidden thinking.
+MAX_COMPLETION_TOKENS_FOR_ONE_WORD = 20
 
 BOOKING_TOOL = ToolSpec(
     name="submit_booking",
@@ -93,6 +98,74 @@ async def check_thinking_disabled(settings) -> bool:
     return ok
 
 
+async def _completion_usage(settings, with_reasoning_setting: bool) -> tuple[dict, str]:
+    """One non-streaming completion; returns the standard OpenAI `usage` object and the answer.
+
+    Deliberately bypasses LLMClient: token accounting is not part of its interface, and this
+    check must see what the backend reports, not what the client chooses to surface.
+    """
+    body = {
+        "model": settings.llm_model,
+        "messages": [{"role": "user", "content": "Скажи одним словом: сколько будет 2+2?"}],
+    }
+    if with_reasoning_setting and settings.llm_reasoning_effort is not None:
+        body["reasoning_effort"] = settings.llm_reasoning_effort
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.llm_base_url,
+            headers={"Authorization": f"Bearer {settings.llm_api_key.get_secret_value()}"},
+            timeout=settings.llm_timeout_seconds,
+        ) as http:
+            response = await http.post("/chat/completions", json=body)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("usage") or {}, data["choices"][0]["message"].get("content") or ""
+    except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+        raise RuntimeError(f"usage probe failed: {type(exc).__name__}: {exc}") from exc
+
+
+async def check_reasoning_tokens(settings) -> bool:
+    """Fail if the backend's token accounting shows the model actually thought.
+
+    The streaming client drops reasoning deltas, so a model that thinks silently can still
+    produce a clean-looking answer; it only shows up as completion tokens (and latency/cost).
+    """
+    print("\n=== 1b. Hidden reasoning tokens (backend's own accounting) ===")
+    setting = settings.llm_reasoning_effort
+    print(f"LLM_REASONING_EFFORT = {setting!r}")
+
+    usage, answer = await _completion_usage(settings, with_reasoning_setting=True)
+    completion = usage.get("completion_tokens")
+    reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    print(
+        f"with your settings: completion_tokens={completion}  reasoning_tokens={reasoning}  "
+        f"answer={answer.strip()[:40]!r}"
+    )
+
+    if setting is not None:  # baseline: same request without the setting, for comparison
+        base_usage, _ = await _completion_usage(settings, with_reasoning_setting=False)
+        base_reasoning = (base_usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        print(
+            f"without the setting (baseline): completion_tokens="
+            f"{base_usage.get('completion_tokens')}  reasoning_tokens={base_reasoning}"
+        )
+
+    if completion is None:
+        print("!! The backend reports no usage.completion_tokens, so thinking cannot be verified.")
+        return False
+    if reasoning:
+        print(f"!! {reasoning} reasoning tokens were spent: thinking is ON.")
+        return False
+    if completion > MAX_COMPLETION_TOKENS_FOR_ONE_WORD:
+        print(
+            f"!! {completion} completion tokens for a one-word answer "
+            f"(limit {MAX_COMPLETION_TOKENS_FOR_ONE_WORD}): thinking is probably ON."
+        )
+        return False
+    print("OK: no hidden reasoning tokens.")
+    return True
+
+
 async def check_tool_calling(settings) -> bool:
     print("\n=== 2. Tool calling ===")
     client = _client(settings)
@@ -150,6 +223,7 @@ async def main() -> int:
 
     results = {
         "thinking_disabled": await check_thinking_disabled(settings),
+        "no_hidden_reasoning": await check_reasoning_tokens(settings),
         "tool_calling": await check_tool_calling(settings),
     }
 
