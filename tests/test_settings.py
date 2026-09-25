@@ -80,3 +80,18 @@ def test_llm_stall_timeouts_must_be_positive(env, name, bad):
     env.setenv(name, bad)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_llm_extra_body_defaults_to_none(env):
+    assert Settings(_env_file=None).llm_extra_body is None
+
+
+def test_llm_extra_body_is_parsed_from_a_json_object(env):
+    env.setenv("LLM_EXTRA_BODY", '{"provider": {"sort": "latency"}}')
+    assert Settings(_env_file=None).llm_extra_body == {"provider": {"sort": "latency"}}
+
+
+def test_llm_extra_body_rejects_invalid_json(env):
+    env.setenv("LLM_EXTRA_BODY", "{not json")
+    with pytest.raises(Exception, match="LLM_EXTRA_BODY|llm_extra_body"):
+        Settings(_env_file=None)

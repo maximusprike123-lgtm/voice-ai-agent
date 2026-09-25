@@ -114,6 +114,12 @@ async def test_an_llm_client_is_built_from_the_settings_when_none_is_passed(tmp_
         assert runtime.llm.base_url == "http://llm.test/v1"
 
 
+async def test_the_llm_extra_body_setting_reaches_the_client(tmp_path):
+    settings = make_settings(tmp_path, llm_extra_body={"provider": {"sort": "latency"}})
+    async with open_runtime(settings) as runtime:
+        assert runtime.llm.extra_body == {"provider": {"sort": "latency"}}
+
+
 async def test_notify_wires_the_notifying_sink_and_delivers_in_the_background(tmp_path):
     notifier = FakeNotifier()
     llm = ScriptedLLM(

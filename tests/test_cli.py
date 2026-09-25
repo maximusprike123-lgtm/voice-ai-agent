@@ -273,7 +273,6 @@ async def test_full_booking_reads_back_saves_and_shows_the_record(tmp_path):
         ["Запишите меня", "Да, всё верно", "Нет, спасибо"],
         tool_round("prepare_booking", BOOKING_ARGS),
         tool_round("confirm_booking"),
-        text("Заявка передана. Нужна ли помощь ещё?"),
         tool_round("end_call"),
         opts=options(caller="+79991234567"),
     )
@@ -282,6 +281,10 @@ async def test_full_booking_reads_back_saves_and_shows_the_record(tmp_path):
     assert "АГЕНТ: Проверьте, пожалуйста: Игорь, полировка кузова" in joined
     assert "Номер телефона заканчивается на четыре пять шесть семь." in joined
     assert "АГЕНТ: Всё верно?" in out
+    assert (
+        "АГЕНТ: Заявка принята и передана администратору, он перезвонит для подтверждения." in out
+    )
+    assert "АГЕНТ: Могу ещё чем-то помочь?" in out  # spoken by code, no LLM round needed
     assert "[конец звонка] агент положил трубку" in joined
     assert "=== Saved during this call ===" in joined
     assert "--- Telegram: не отправлено ---" in joined  # notifications are off

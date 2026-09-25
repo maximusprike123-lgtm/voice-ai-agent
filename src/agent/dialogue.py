@@ -68,6 +68,9 @@ class Say:
 class ToolResult:
     call: ToolCall
     result: str
+    # The tool changed something in the outside world (saved a booking or a message). Lets
+    # the session know the caller must never be told "I didn't hear you" about this turn.
+    committed: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,8 @@ class ToolOutcome:
     # a round has it, the turn ends there: the text goes into the history as an assistant
     # message and the engine waits for the caller instead of calling the LLM again.
     say: str | None = None
+    # The tool made a lasting change (a record was saved). See ToolResult.committed.
+    committed: bool = False
 
 
 class ToolExecutor(Protocol):
@@ -273,7 +278,7 @@ class DialogueEngine:
                     ends_call = ends_call or outcome.ends_call
                     if outcome.say:
                         scripted.append(outcome.say)
-                    yield ToolResult(call, outcome.result)
+                    yield ToolResult(call, outcome.result, outcome.committed)
             except (asyncio.CancelledError, GeneratorExit):
                 # Never leave a tool call in the history without a matching result.
                 for call in calls[done:]:

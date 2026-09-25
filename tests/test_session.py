@@ -5,11 +5,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from agent.dialogue import DialogueEngine, EndCall, Say, ToolOutcome
+from agent.dialogue import DialogueEngine, EndCall, Say, ToolOutcome, ToolResult
 from agent.llm import LLMError, Message, Role, StreamEnd, TextDelta, ToolCall, ToolCallEvent
 from agent.records import InMemorySink
 from agent.session import (
     ASK_TO_REPEAT,
+    COMMITTED_FALLBACK,
     FINAL_APOLOGY,
     MAX_UTTERANCE_CHARS,
     CallSession,
@@ -268,6 +269,95 @@ async def test_without_caller_id_the_callback_still_saves():
     assert sink.messages[0].caller_phone is None
 
 
+# --- A failure after a tool saved something -------------------------------------------------------
+
+
+def committing_round(name="take_message"):
+    return [ToolCallEvent(ToolCall("c1", name, "{}")), StreamEnd("tool_calls")]
+
+
+COMMITS = {"take_message": ToolOutcome("сохранено", committed=True)}  # a save, but no `say`
+
+
+async def test_a_failure_after_a_committed_tool_never_asks_the_caller_to_repeat():
+    session, _, sink, engine = make_session(
+        committing_round(), failing_round(), failing_round(), tools=NoTools(COMMITS)
+    )
+    session.greet()
+
+    events = await turn(session, "Передайте администратору мой вопрос")
+
+    assert isinstance(events[0], ToolResult) and events[0].committed
+    assert isinstance(events[1], TurnFailed)
+    said = [e for e in events if isinstance(e, Say)]
+    assert " ".join(e.text for e in said) == COMMITTED_FALLBACK
+    assert all("расслышал" not in e.text for e in said)
+    assert not session.ended and sink.messages == []  # no callback: nothing was lost
+    # the model knows what the caller was told:
+    assert engine.messages[-1] == Message(Role.ASSISTANT, COMMITTED_FALLBACK)
+    assert [m.role for m in engine.messages][-3:] == [Role.ASSISTANT, Role.TOOL, Role.ASSISTANT]
+
+
+async def test_that_turn_does_not_count_towards_the_two_failures_that_end_the_call():
+    session, _, _, _ = make_session(
+        committing_round(),
+        failing_round(),
+        failing_round(),  # turn 1: committed, then fails
+        failing_round(),
+        failing_round(),  # turn 2: a plain failure
+        tools=NoTools(COMMITS),
+    )
+
+    await turn(session, "раз")
+    second = await turn(session, "два")
+
+    assert second[-1] == Say(ASK_TO_REPEAT)  # the FIRST plain failure, not the second in a row
+    assert not session.ended
+
+
+async def test_a_failure_after_a_tool_that_saved_nothing_still_asks_to_repeat():
+    session, _, _, _ = make_session(
+        committing_round("end_call_not_really"), failing_round(), failing_round()
+    )
+
+    events = await turn(session, "раз")
+
+    assert events[-1] == Say(ASK_TO_REPEAT)
+
+
+async def test_a_commit_in_an_earlier_turn_does_not_leak_into_a_later_failure():
+    session, _, _, _ = make_session(
+        committing_round(),
+        text("Слушаю вас."),  # turn 1: commits, the model then answers fine
+        failing_round(),
+        failing_round(),  # turn 2: fails with nothing committed in this turn
+        tools=NoTools(COMMITS),
+    )
+
+    await turn(session, "раз")
+    second = await turn(session, "два")
+
+    assert second[-1] == Say(ASK_TO_REPEAT)
+
+
+async def test_a_committed_turn_that_succeeds_is_untouched():
+    outcomes = {"take_message": ToolOutcome("сохранено", committed=True, say="Передано.")}
+    session, _, _, _ = make_session(committing_round(), tools=NoTools(outcomes))
+
+    events = await turn(session, "вопрос")
+
+    assert [e for e in events if isinstance(e, Say)] == [Say("Передано.")]
+    assert not any(isinstance(e, TurnFailed) for e in events)
+
+
+def test_the_committed_fallback_is_neutral_and_says_nothing_about_not_hearing():
+    assert "расслышал" not in COMMITTED_FALLBACK and "Повторите" not in COMMITTED_FALLBACK
+    assert not any(ch.isdigit() for ch in COMMITTED_FALLBACK)
+    for gendered in ("принял", "записал", "передал"):
+        assert gendered not in COMMITTED_FALLBACK.lower()
+    assert COMMITTED_FALLBACK.endswith("Могу ещё чем-то помочь?")
+
+
 # --- The phrases ----------------------------------------------------------------------------------
 
 
@@ -277,7 +367,7 @@ def test_fallback_phrases_use_masculine_forms_to_be_matched_with_the_tts_voice()
     assert "не расслышал" in ASK_TO_REPEAT
 
 
-@pytest.mark.parametrize("phrase", [ASK_TO_REPEAT, FINAL_APOLOGY])
+@pytest.mark.parametrize("phrase", [ASK_TO_REPEAT, FINAL_APOLOGY, COMMITTED_FALLBACK])
 def test_fallback_phrases_have_no_digits_and_no_markup(phrase):
     assert not any(ch.isdigit() for ch in phrase)
     assert not any(ch in phrase for ch in "*_#<>")

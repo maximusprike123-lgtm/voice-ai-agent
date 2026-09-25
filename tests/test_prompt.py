@@ -136,10 +136,12 @@ def test_static_part_forbids_saying_recorded_before_confirmation(business):
     assert "«хорошо»" in static and "«принято»" in static
 
 
-def test_static_part_says_to_ask_for_more_help_and_wait_before_ending_the_call(business):
+def test_static_part_says_the_system_announces_results_and_to_wait_before_ending_the_call(business):
     static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
-    assert "спроси, нужна ли помощь ещё, и дождись ответа клиента" in static
-    assert "Не завершай звонок в том же ответе, в котором подтвердил заявку" in static
+    assert "система сама сообщит клиенту, что заявка принята" in static
+    assert "спросит, нужна ли помощь ещё: ничего не добавляй и дождись ответа клиента" in static
+    assert "система сама сообщит клиенту, что сообщение передано" in static  # take_message
+    assert "Не завершай звонок в том же ответе, в котором заявка или сообщение приняты" in static
     assert "Если end_call вернул ОШИБКА" in static
 
 

@@ -21,6 +21,7 @@ from agent.dialogue import (
     DialogueEvent,
     EndCall,
     Say,
+    ToolResult,
     split_sentences,
 )
 from agent.llm import LLMError
@@ -33,6 +34,13 @@ logger = logging.getLogger(__name__)
 ASK_TO_REPEAT = "Простите, я не расслышал. Повторите, пожалуйста."
 FINAL_APOLOGY = (
     "Извините, у нас возникли технические неполадки. Администратор перезвонит вам. До свидания."
+)
+
+# Said when a turn fails AFTER a tool saved something (a booking, a message): the caller must
+# never hear «не расслышал» about a request that was in fact taken. Neutral wording; it does not
+# say which request, so it is safe whatever tool committed.
+COMMITTED_FALLBACK = (
+    "Ваша просьба принята и передана администратору, он свяжется с вами. Могу ещё чем-то помочь?"
 )
 
 MAX_FAILED_TURNS_IN_A_ROW = 2
@@ -79,12 +87,26 @@ class CallSession:
     async def handle(self, user_text: str) -> AsyncIterator[SessionEvent]:
         """One caller utterance in, the agent's reaction out (fallback phrases included)."""
         self._utterances.append(user_text)
+        committed = False  # did a tool save something during this turn?
         try:
             async for event in self._engine.respond(user_text):
                 if isinstance(event, EndCall):
                     self.ended = True
+                elif isinstance(event, ToolResult) and event.committed:
+                    committed = True
                 yield event
         except (LLMError, DialogueError) as exc:
+            if committed:
+                # The work is done and saved; only the model's follow-up failed. Say so in
+                # code instead of asking the caller to repeat, and don't count it as a failed
+                # turn: the caller got a correct answer.
+                logger.warning("turn failed after a tool committed (%s)", exc)
+                yield TurnFailed(str(exc), self._failed_in_a_row)
+                self._failed_in_a_row = 0
+                self._engine.add_assistant_message(COMMITTED_FALLBACK)
+                for sentence in split_sentences(COMMITTED_FALLBACK):
+                    yield Say(sentence)
+                return
             self._failed_in_a_row += 1
             logger.warning("turn failed (%d in a row): %s", self._failed_in_a_row, exc)
             yield TurnFailed(str(exc), self._failed_in_a_row)

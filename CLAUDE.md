@@ -46,6 +46,11 @@ owner via Telegram. No real calendar integration — the owner confirms manually
       `reasoning`/`reasoning_content` delta fields a backend might stream, so thinking text
       can never leak into speech. But a silent thinker still costs tokens and latency, which
       is why `check_llm.py` checks the backend's own `usage` numbers (see Commands).
+    - **Optional `extra_body` passthrough** (`LLM_EXTRA_BODY`, a JSON object; `None` = nothing
+      added): merged into every request body, for backend-specific options such as OpenRouter
+      provider routing (`{"provider": {"order": [...], "allow_fallbacks": true}}`). It may not
+      override the fields the client owns (`model`, `messages`, `stream`, `tools`,
+      `reasoning_effort`). Verified live end to end. LLMClient defaults are unchanged.
   - **STT/TTS:** vendor not chosen yet (candidates: ElevenLabs, Deepgram). Foreign services
     are acceptable for the MVP despite the RU-only telephony/LLM hosting constraint — this
     may need a network path check once a vendor is picked.
@@ -55,7 +60,9 @@ owner via Telegram. No real calendar integration — the owner confirms manually
   has read the draft back; the read-back text is built by code and spoken verbatim by the
   engine (`ToolOutcome.say`), so its phone digits are always exactly the last 4 and its
   numbers/dates/times are always in words; the model is never asked to say digits; an
-  approximate time cannot become an invented HH:MM because it goes into `preferred_period`.
+  approximate time cannot become an invented HH:MM because it goes into `preferred_period`; the
+  caller hears that a booking/message was accepted from a code-built sentence
+  (`confirm_booking` / `take_message` return `say`), never from a model round that could stall.
   When a live run shows the model slipping on something that matters, move it into code
   rather than into more prompt text. The LLM keeps what is conversational: understanding the
   caller, phrasing questions, answering FAQ.
@@ -71,22 +78,6 @@ owner via Telegram. No real calendar integration — the owner confirms manually
   between a successful send and marking the row, the message is sent again on the next
   start/sweep, so the owner may occasionally see a duplicate. Accepted on purpose: a duplicate
   is harmless, a lost booking is not. Don't "fix" it without a plan for the lost-message case.
-- **Principle: code enforces guarantees, the LLM handles conversation.** Anything the business
-  relies on must not depend on the model obeying the prompt. Examples so far: booking data is
-  validated and normalized in code; a booking is saved only by `confirm_booking` after code
-  has read the draft back; the read-back text is built by code and spoken verbatim by the
-  engine (`ToolOutcome.say`), so its phone digits are always exactly the last 4 and its
-  numbers/dates/times are always in words; the model is never asked to say digits; an
-  approximate time cannot become an invented HH:MM because it goes into `preferred_period`.
-  When a live run shows the model slipping on something that matters, move it into code
-  rather than into more prompt text. The LLM keeps what is conversational: understanding the
-  caller, phrasing questions, answering FAQ.
-- **Knowledge:** `config/business.yaml` (hours, services, prices, FAQ) loaded straight into
-  the system prompt. No RAG — the FAQ is small and fixed.
-- **Bookings:** validated, then **written to SQLite before** the Telegram notification is
-  sent, so nothing is lost if Telegram fails. The agent never confirms a time slot itself.
-  SQLite is also the outbox: every row has `notified_at` (NULL until the owner was told), so
-  after a crash between save and Telegram the notifier re-sends whatever is still NULL.
 - **Scope:** inbound calls only, Russian only, no call transfer, no LangVerse code reused.
 
 ## Status
@@ -170,6 +161,21 @@ real path (temporary SQLite + `NotifyingSink` + Telegram); verified live: delive
 notified, token absent from all output. Nothing wires `NotifyingSink` into
 an app yet: the CLI (1.9) / call handler (step 3) will build store → notifier → sink and call
 `start()`/`aclose()`.
+
+1.9 follow-up (found by the live CLI run): **the caller is never told the outcome of a save by
+the LLM.** `ToolOutcome` gained `committed` (a record was saved; also on `ToolResult`).
+`confirm_booking` success returns a code-built `say`: «Заявка принята и передана администратору,
+он перезвонит для подтверждения. [Точное время администратор уточнит при звонке.] Могу ещё
+чем-то помочь?» (a duplicate confirm has its own sentence); `take_message` success: «Сообщение
+передано администратору, он свяжется с вами. Могу ещё чем-то помочь?» (all neutral, no
+gendered verbs). The engine speaks it and ends the turn with no further LLM call, which also
+saves a round trip; the prompt tells the model not to add anything. **Safety net** in
+`CallSession`: if a turn fails after any tool with `committed=True` succeeded, it says
+`COMMITTED_FALLBACK` («Ваша просьба принята и передана администратору, он свяжется с вами. Могу
+ещё чем-то помочь?»), adds it to the history, and does not count the turn as a failed turn,
+never «не расслышал». `LLMClient` got the optional `extra_body` passthrough (above);
+`scripts/latency_study.py` measures TTFT per routing configuration (results in Known open
+issues).
 
 Backend switch (after 1.6): main LLM is now OpenRouter DeepSeek (see Architecture);
 `check_llm.py` gained the token-based "no hidden reasoning" check (it fails if
@@ -264,21 +270,32 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   TTS voice chosen in step 2** (`ASK_TO_REPEAT` in `session.py`; a test documents it). The
   model's own wording is gendered too («принял», «записал»): the prompt should state the
   agent's gender once the voice is chosen.
-- **A failure AFTER `confirm_booking` still asks the caller to "repeat" (seen live, 1.9).**
-  `confirm_booking` succeeded (booking saved and later delivered), then the follow-up LLM round
-  stalled twice, so the caller heard «Простите, я не расслышал. Повторите, пожалуйста.» about
-  something that had actually been accepted. The next turn recovered (the history was intact),
-  but a caller can't be told "not heard" after a booking was taken. Fix idea, in line with
-  "code enforces guarantees": when a turn fails after a tool with side effects succeeded, the
-  session says a code-built sentence («Заявка принята, администратор перезвонит вам для
-  подтверждения. Могу помочь ещё чем-нибудь?») instead of ASK_TO_REPEAT, or `confirm_booking`
-  itself carries a `say`. Not done yet.
-- **OpenRouter first-token stalls are frequent enough that the 4s timeout fires often** (live
-  CLI run, 2026-09-25: 3 first-token timeouts in ~10 LLM rounds; the engine's retry recovered
-  two of them, the third failed twice → the issue above). The earlier median (~1.2s) hid a fat
-  tail. Options: raise `LLM_FIRST_EVENT_TIMEOUT_SECONDS` (worst case before the fallback grows
-  as 2x), pin/sort OpenRouter providers by latency, or choose another backend. Measure again on
-  the production backend in the step-2 decision.
+- **OpenRouter first-token latency, measured per routing configuration**
+  (`scripts/latency_study.py`: 2 runs x 40 rounds x 5 configurations, real prompt + real tools,
+  thinking off, 2026-09-25 ~19:00 MSK, from the dev Mac, so NOT the production VPS; the requests
+  of a round are sent concurrently). Two runs, p50 / p90 / max / share over 4s:
+  default routing 1.53/2.06/5.3/2% and 1.69/2.49/5.2/5% (served by DeepInfra ~55%, Fireworks
+  ~30%, Together ~12%) · `sort=latency` 1.46/2.51/5.3/5% and 1.63/2.54/5.4/5% (same provider mix
+  as default: it did not concentrate on the fastest) · pinned **Fireworks** 1.59/2.15/2.7/0% and
+  1.63/2.09/3.0/0% · pinned **DeepInfra** 1.58/2.86/11.5/5% and 1.64/4.19/**36.6**/12% · pinned
+  **Together** 1.17/1.87/6.1/2% and 1.17/1.92/3.6/0%. So p50 is ~1.2-1.7s everywhere; the
+  difference is the TAIL, and **DeepInfra is the tail** (worst in both runs, and default routing
+  sends it the most traffic); Together has the best p50/p90, Fireworks the tightest max. With 40
+  samples p99 is the maximum, and Together-vs-Fireworks differences are within noise; DeepInfra's
+  tail is the one repeated finding. Time until the engine can see a tool-call reply (arguments
+  complete) was only ~0.6s (max 1.1s) after the first token in the 6 tool replies observed, so
+  tool calls do not explain the 4s timeouts seen in the live CLI run (3 in ~10 rounds, default
+  routing, multi-turn history: worse than the study suggests; the study does not cover long
+  histories). **Not applied (decision pending; timeouts unchanged):** a preferred order with
+  fallbacks (`LLM_EXTRA_BODY={"provider": {"order": ["Together", "Fireworks"],
+  "allow_fallbacks": true}}`, verified live: 8/8 requests served by Together) or
+  `{"provider": {"ignore": ["DeepInfra"]}}`; re-run the study from the production VPS before
+  deciding.
+- **OpenRouter account guardrails limit which providers can serve us:** the account's privacy
+  settings (zero data retention, no training on prompts) remove `deepseek` (first party),
+  `alibaba`, `streamlake`, `gmicloud` and `atlas-cloud` from routing; pinning `DeepSeek` fails
+  with HTTP 404 "No endpoints found". Good for customer data (names, phone numbers), but the
+  eligible set is US/EU infra providers, and changing those settings changes the latency picture.
 - **Fixed-order `--script` callers are fragile** (a model that inserts one extra «Верно?» shifts
   every later answer: the first live run answered the read-back with «Нет, спасибо» and
   correctly hung up without booking). `scripts/scenarios/*.txt` are for eyeballing; the 1.10
@@ -301,6 +318,7 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 .venv/bin/python scripts/measure_ttft.py  # real prompt through DialogueEngine: cold/warm TTFT
 .venv/bin/python scripts/live_booking_dialogue.py  # scripted caller books via the real LLM + tools
 .venv/bin/python scripts/send_test_notification.py  # ONE real test message to the owner's Telegram
+.venv/bin/python scripts/latency_study.py            # TTFT p50/p90/p99 per OpenRouter routing (~4 min, cents)
 .venv/bin/python -m agent.cli --show-tools           # talk to the agent in the terminal (see 1.9)
 .venv/bin/python -m agent.cli --script scripts/scenarios/booking_saturday_afternoon.txt \
     --caller +79991234567 --show-tools --db /tmp/scratch.db   # scripted call; add --notify for real Telegram

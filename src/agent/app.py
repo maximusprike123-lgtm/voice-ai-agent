@@ -84,6 +84,7 @@ async def open_runtime(
                 api_key=settings.llm_api_key.get_secret_value(),
                 model=settings.llm_model,
                 reasoning_effort=settings.llm_reasoning_effort,
+                extra_body=settings.llm_extra_body,
                 timeout_seconds=settings.llm_timeout_seconds,
             )
 

@@ -25,6 +25,10 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 NOW = datetime(2026, 9, 24, 17, 5, tzinfo=MOSCOW)  # Thursday; Mon-Fri 10-21, Sat 10-20, Sun off
 FRIDAY, SATURDAY, SUNDAY = "2026-09-25", "2026-09-26", "2026-09-27"
 
+CONFIRMED_SAY = (
+    "Заявка принята и передана администратору, он перезвонит для подтверждения. "
+    "Могу ещё чем-то помочь?"
+)
 DEFAULT_READ_BACK = (
     "Проверьте, пожалуйста: Игорь, полировка кузова, автомобиль Toyota Camry, "
     "в пятницу, двадцать пятого сентября, в четырнадцать часов. "
@@ -205,7 +209,8 @@ async def test_confirm_saves_the_prepared_draft_with_normalized_fields(tools, si
     await prepare(tools)
     outcome = await confirm(tools)
 
-    assert not is_error(outcome) and not outcome.ends_call and outcome.say is None
+    assert not is_error(outcome) and not outcome.ends_call
+    assert outcome.say == CONFIRMED_SAY and outcome.committed
     assert sink.bookings == [
         Booking(
             name="Игорь",
@@ -258,11 +263,13 @@ async def test_confirm_revalidates_and_rejects_a_draft_that_went_stale(business,
     assert is_error(await confirm(tools))  # the draft is gone
 
 
-async def test_success_result_never_confirms_the_slot(tools):
+async def test_what_the_caller_hears_never_claims_the_slot_is_confirmed(tools):
     await prepare(tools)
-    result = (await confirm(tools)).result
-    assert "перезвонит для подтверждения" in result
-    assert "Не говори, что время подтверждено" in result
+    say = (await confirm(tools)).say
+
+    assert "перезвонит для подтверждения" in say
+    for claim in ("подтверждена", "подтверждено", "подтверждён", "записан"):
+        assert claim not in say
 
 
 async def test_price_restriction_applies_only_to_the_other_service(tools):
@@ -597,16 +604,139 @@ async def test_a_second_booking_later_in_the_call_is_guarded_again(tools):
     assert (await call(tools, "end_call")).ends_call
 
 
-async def test_the_success_result_tells_the_model_to_ask_and_wait(tools):
+async def test_the_success_result_tells_the_model_the_caller_was_already_told_and_to_wait(tools):
     await prepare(tools)
     result = (await confirm(tools)).result
-    assert "спроси, нужна ли помощь ещё" in result and "end_call вызывать нельзя" in result
+    assert "Клиенту уже сообщено" in result and "Ничего не добавляй" in result
+    assert "end_call вызывать нельзя" in result
 
 
 def test_the_end_call_schema_stays_static_and_mentions_the_rule(business):
     spec = build_tool_specs(business)[3]
     assert spec.name == "end_call" and spec.parameters == {"type": "object", "properties": {}}
     assert "дождись ответа" in spec.description
+
+
+# --- What the caller hears after a save is built by code ------------------------------------------
+
+
+async def test_time_note_is_added_when_only_a_period_was_given(tools):
+    await prepare(tools, preferred_time=None, preferred_period="день")
+    outcome = await confirm(tools)
+
+    assert outcome.say == (
+        "Заявка принята и передана администратору, он перезвонит для подтверждения. "
+        "Точное время администратор уточнит при звонке. Могу ещё чем-то помочь?"
+    )
+
+
+async def test_the_other_service_says_the_same_and_never_names_a_price(tools):
+    await prepare(tools, service_id="other", notes="нужна консультация", preferred_time="14:00")
+    outcome = await confirm(tools)
+
+    assert outcome.say == CONFIRMED_SAY
+    assert "₽" not in outcome.say and "руб" not in outcome.say
+
+
+async def test_the_confirmation_wording_is_gender_neutral_and_has_no_digits(tools):
+    await prepare(tools, preferred_time=None, preferred_period="утро")
+    say = (await confirm(tools)).say
+    await call(tools, "take_message", {"message": "вопрос"})
+
+    from agent.tools import (
+        BOOKING_ACCEPTED_SAY,
+        BOOKING_ALREADY_ACCEPTED_SAY,
+        MESSAGE_TAKEN_SAY,
+    )
+
+    for text_ in (say, BOOKING_ACCEPTED_SAY, BOOKING_ALREADY_ACCEPTED_SAY, MESSAGE_TAKEN_SAY):
+        assert not any(ch.isdigit() for ch in text_)
+        for gendered in ("принял", "записал", "передал", "понял"):
+            assert gendered not in text_.lower()
+
+
+async def test_a_duplicate_confirm_also_speaks_from_code(tools):
+    await book(tools)
+    outcome = await book(tools)
+
+    assert outcome.say == (
+        "Эта заявка уже принята, администратор перезвонит для подтверждения. "
+        "Могу ещё чем-то помочь?"
+    )
+    assert outcome.committed and not is_error(outcome)
+
+
+async def test_take_message_speaks_from_code_and_commits(tools, sink):
+    outcome = await call(tools, "take_message", {"message": "Хочу узнать про скидки"})
+
+    assert outcome.say == (
+        "Сообщение передано администратору, он свяжется с вами. Могу ещё чем-то помочь?"
+    )
+    assert outcome.committed and not outcome.ends_call
+    assert "Клиенту уже сообщено" in outcome.result and "Ничего не добавляй" in outcome.result
+    assert len(sink.messages) == 1
+
+
+async def test_only_saves_are_committed(tools, business):
+    assert not (await prepare(tools)).committed  # a draft is not a change
+    assert (await confirm(tools)).committed
+    assert not (await call(tools, "end_call")).committed
+    assert not (await confirm(tools)).committed  # no draft any more: an error
+    assert not (await call(tools, "take_message", {})).committed  # missing message: an error
+
+
+async def test_failures_have_no_say_and_are_not_committed(business):
+    tools = ToolRegistry(business, BrokenSink(), clock=lambda: NOW)
+    await prepare(tools)
+    failed_booking = await confirm(tools)
+    failed_message = await call(tools, "take_message", {"message": "вопрос"})
+
+    for outcome in (failed_booking, failed_message):
+        assert is_error(outcome) and outcome.say is None and not outcome.committed
+
+
+async def test_validation_errors_and_prepare_have_no_committed_flag(tools):
+    assert not (await prepare(tools, phone="12")).committed
+    assert (await prepare(tools)).say is not None  # the read-back, but still not a commit
+
+
+async def test_take_message_through_the_engine_ends_the_turn_without_another_llm_call(
+    business, sink
+):
+    llm = ScriptedLLM(
+        [
+            ToolCallEvent(ToolCall("c1", "take_message", '{"message": "Есть ли скидки?"}')),
+            StreamEnd("tool_calls"),
+        ],
+    )
+    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+
+    events = [e async for e in engine.respond("Есть ли скидки?")]
+
+    assert isinstance(events[0], ToolResult) and events[0].committed
+    assert " ".join(e.text for e in events if isinstance(e, Say)) == (
+        "Сообщение передано администратору, он свяжется с вами. Могу ещё чем-то помочь?"
+    )
+    assert len(llm.calls) == 1 and len(sink.messages) == 1
+
+
+async def test_the_caller_can_hang_up_on_the_turn_after_the_acceptance(business, sink):
+    llm = ScriptedLLM(
+        tool_round(prepare_call()),
+        tool_round(ToolCall("c2", "confirm_booking", "{}")),
+        [
+            TextDelta("Всего доброго!"),
+            ToolCallEvent(ToolCall("c3", "end_call", "{}")),
+            StreamEnd("tool_calls"),
+        ],
+    )
+    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+
+    await collect_events(engine, "Запишите меня")
+    await collect_events(engine, "Да, всё верно")
+    last = await collect_events(engine, "Нет, спасибо")
+
+    assert last[-1] == EndCall() and Say("Всего доброго!") in last
 
 
 # --- Malformed calls ------------------------------------------------------------------------------
@@ -731,9 +861,7 @@ async def test_read_back_is_spoken_verbatim_and_the_turn_ends_without_another_ll
 
 async def test_full_flow_prepare_yes_confirm_through_the_engine(business, sink):
     llm = ScriptedLLM(
-        tool_round(prepare_call()),
-        tool_round(ToolCall("c2", "confirm_booking", "{}")),
-        [TextDelta("Заявка передана, администратор перезвонит."), StreamEnd("stop")],
+        tool_round(prepare_call()), tool_round(ToolCall("c2", "confirm_booking", "{}"))
     )
     engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
 
@@ -742,7 +870,12 @@ async def test_full_flow_prepare_yes_confirm_through_the_engine(business, sink):
     events = [e async for e in engine.respond("Да, всё верно")]
 
     assert len(sink.bookings) == 1 and sink.bookings[0].preferred_time == time(14, 0)
-    assert events[-1] == Say("Заявка передана, администратор перезвонит.")
+    # The acceptance is spoken by code and the turn ends: no third LLM call.
+    assert [type(e) for e in events] == [ToolResult, Say, Say]
+    assert events[0].committed is True
+    assert " ".join(e.text for e in events if isinstance(e, Say)) == CONFIRMED_SAY
+    assert len(llm.calls) == 2
+    assert engine.messages[-1] == Message(Role.ASSISTANT, CONFIRMED_SAY)
     # On the "yes" turn the model saw the read-back in its history:
     assert Message(Role.ASSISTANT, DEFAULT_READ_BACK) in llm.calls[1]
 
@@ -777,10 +910,6 @@ async def test_model_that_confirms_and_hangs_up_in_one_turn_is_stopped_then_may_
         tool_round(prepare_call()),
         # turn 2: the caller says «да»; the model confirms and tries to hang up in the same round
         [ToolCallEvent(confirm_call), ToolCallEvent(hangup_early), StreamEnd("tool_calls")],
-        [
-            TextDelta("Администратор перезвонит вам. Нужна ли помощь ещё?"),
-            StreamEnd("stop"),
-        ],
         # turn 3: «нет, спасибо»
         [TextDelta("Всего доброго!"), ToolCallEvent(hangup_later), StreamEnd("tool_calls")],
     )
@@ -794,7 +923,9 @@ async def test_model_that_confirms_and_hangs_up_in_one_turn_is_stopped_then_may_
     assert not any(isinstance(e, EndCall) for e in second)  # the call was NOT ended
     early_result = [e for e in second if isinstance(e, ToolResult) and e.call.name == "end_call"]
     assert early_result[0].result.startswith(ERROR_PREFIX)
-    assert Say("Администратор перезвонит вам.") in second and Say("Нужна ли помощь ещё?") in second
+    # The caller still hears the acceptance and the question, from code, in that same turn:
+    assert Say("Могу ещё чем-то помочь?") in second
+    assert len(llm.calls) == 3  # no LLM round was needed to tell the caller
     assert isinstance(third[-1], EndCall)
 
 

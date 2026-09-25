@@ -4,6 +4,7 @@ Nothing outside this module should know which backend is behind LLM_BASE_URL. Th
 the app (DialogueEngine, tools) speaks only in terms of Message / ToolSpec / StreamEvent.
 """
 
+import copy
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -11,6 +12,9 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 import httpx
+
+# Request fields the client sets itself; `extra_body` must not replace them.
+RESERVED_BODY_FIELDS = frozenset({"model", "messages", "stream", "tools", "reasoning_effort"})
 
 
 class LLMError(Exception):
@@ -127,8 +131,20 @@ class OpenAICompatibleLLMClient:
     api_key: str
     model: str
     reasoning_effort: str | None = None
+    # Optional passthrough of extra top-level request fields, merged into every request body
+    # as-is (the OpenAI SDK calls this "extra_body"). For backend-specific routing options,
+    # e.g. OpenRouter's {"provider": {"sort": "latency"}}. None: nothing is added. It may not
+    # override the fields this client owns.
+    extra_body: dict[str, Any] | None = None
     timeout_seconds: float = 60.0
     _client: httpx.AsyncClient | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        clash = sorted(RESERVED_BODY_FIELDS & set(self.extra_body or {}))
+        if clash:
+            raise ValueError(
+                f"extra_body may not override request fields owned by the client: {clash}"
+            )
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is not None:
@@ -153,6 +169,8 @@ class OpenAICompatibleLLMClient:
             body["tools"] = [t.to_api() for t in tools]
         if self.reasoning_effort is not None:
             body["reasoning_effort"] = self.reasoning_effort
+        if self.extra_body:
+            body.update(copy.deepcopy(self.extra_body))
         return body
 
     async def stream(

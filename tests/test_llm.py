@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from agent.llm import (
+    RESERVED_BODY_FIELDS,
     LLMError,
     Message,
     OpenAICompatibleLLMClient,
@@ -300,3 +301,59 @@ async def test_malformed_sse_chunk_raises_llm_error():
     client = make_client(handler)
     with pytest.raises(LLMError, match="malformed"):
         [_ async for _ in client.stream([Message(Role.USER, "hi")])]
+
+
+# --- extra_body passthrough -----------------------------------------------------------------------
+
+
+async def capture_body(client) -> dict:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=sse(chunk({}, finish_reason="stop"), "[DONE]"))
+
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://test/v1"
+    )
+    [_ async for _ in client.stream([Message(Role.USER, "hi")])]
+    return captured["body"]
+
+
+async def test_extra_body_is_merged_into_every_request():
+    client = make_client(
+        lambda r: None, extra_body={"provider": {"sort": "latency"}, "usage": {"include": True}}
+    )
+    body = await capture_body(client)
+
+    assert body["provider"] == {"sort": "latency"} and body["usage"] == {"include": True}
+    assert body["model"] == "test-model" and body["stream"] is True  # the client's own fields stay
+
+
+async def test_extra_body_is_omitted_when_unset():
+    body = await capture_body(make_client(lambda r: None))
+    assert set(body) == {"model", "messages", "stream"}
+
+
+async def test_extra_body_works_together_with_reasoning_effort_and_tools():
+    client = make_client(
+        lambda r: None, reasoning_effort="none", extra_body={"provider": {"order": ["Fireworks"]}}
+    )
+    body = await capture_body(client)
+    assert body["reasoning_effort"] == "none" and body["provider"] == {"order": ["Fireworks"]}
+
+
+@pytest.mark.parametrize("field", sorted(RESERVED_BODY_FIELDS))
+def test_extra_body_may_not_override_the_fields_the_client_owns(field):
+    with pytest.raises(ValueError, match=field):
+        OpenAICompatibleLLMClient("http://x/v1", "k", "m", extra_body={field: "hijacked"})
+
+
+async def test_extra_body_is_copied_so_a_request_cannot_change_the_configuration():
+    extra = {"provider": {"order": ["Fireworks"]}}
+    client = make_client(lambda r: None, extra_body=extra)
+
+    body = client._build_body([Message(Role.USER, "hi")], None)
+    body["provider"]["order"].append("SomebodyElse")
+
+    assert extra == {"provider": {"order": ["Fireworks"]}}

@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
@@ -21,6 +22,9 @@ class Settings(BaseSettings):
     # "none" disables thinking; low/medium/high enable it at that effort level.
     llm_reasoning_effort: str | None = None
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Optional JSON object merged into every chat-completions request body (see LLMClient).
+    # E.g. LLM_EXTRA_BODY={"provider": {"sort": "latency"}} for OpenRouter provider routing.
+    llm_extra_body: dict[str, Any] | None = None
     # Per-turn stall limits used by DialogueEngine (not by the HTTP client): how long to wait
     # for the first token, and, once text is flowing, for each further chunk. A silence at the
     # start is retried once, so the caller waits at most about 2 x the first-event timeout.

@@ -35,6 +35,16 @@ PHONE_DIGITS_READ_BACK = 4  # the read-back always says exactly this many traili
 
 ERROR_PREFIX = "ОШИБКА:"
 
+# What the caller hears after a successful save. Built by code and spoken verbatim by the engine
+# (ToolOutcome.say), so telling the caller the outcome never depends on another LLM round.
+# Neutral wording on purpose (no «принял/записал»): the voice's gender is chosen in step 2.
+ANYTHING_ELSE_SAY = "Могу ещё чем-то помочь?"
+BOOKING_ACCEPTED_SAY = "Заявка принята и передана администратору, он перезвонит для подтверждения."
+BOOKING_ALREADY_ACCEPTED_SAY = "Эта заявка уже принята, администратор перезвонит для подтверждения."
+EXACT_TIME_NOTE_SAY = "Точное время администратор уточнит при звонке."
+MESSAGE_TAKEN_SAY = "Сообщение передано администратору, он свяжется с вами."
+
+
 # preferred_period value -> how it is said in the read-back.
 PERIODS = {
     "утро": "утром",
@@ -121,7 +131,9 @@ def build_tool_specs(business: BusinessConfig) -> list[ToolSpec]:
             name="confirm_booking",
             description=(
                 "Отправить подготовленную заявку администратору. Вызывай ТОЛЬКО после того, как "
-                "клиент ясно сказал «да» на зачитанный текст проверки. Без аргументов."
+                "клиент ясно сказал «да» на зачитанный текст проверки. Без аргументов. "
+                "Система САМА сообщит клиенту, что заявка принята, и спросит, нужна ли помощь "
+                "ещё: ничего не добавляй."
             ),
             parameters={"type": "object", "properties": {}},
         ),
@@ -129,7 +141,8 @@ def build_tool_specs(business: BusinessConfig) -> list[ToolSpec]:
             name="take_message",
             description=(
                 "Передать сообщение или вопрос администратору, когда ответа нет в сведениях "
-                "или клиент просит с ним связаться."
+                "или клиент просит с ним связаться. Система САМА сообщит клиенту, что "
+                "сообщение передано, и спросит, нужна ли помощь ещё: ничего не добавляй."
             ),
             parameters={
                 "type": "object",
@@ -268,7 +281,12 @@ class ToolRegistry:
         if key in self._submitted:
             self._draft = None
             self._confirmed_in_turn = self._turn
-            return ToolOutcome("Эта заявка уже принята раньше. Повторно отправлять не нужно.")
+            return ToolOutcome(
+                "Эта заявка уже принята раньше, повторно отправлять не нужно. Клиенту уже "
+                "сообщено об этом; жди его ответа.",
+                say=f"{BOOKING_ALREADY_ACCEPTED_SAY} {ANYTHING_ELSE_SAY}",
+                committed=True,
+            )
 
         booking = Booking(
             name=fields.name,
@@ -297,16 +315,19 @@ class ToolRegistry:
         self._confirmed_in_turn = self._turn
 
         result = (
-            "Заявка принята и передана администратору. Скажи клиенту, что администратор "
-            "перезвонит для подтверждения записи. Не говори, что время подтверждено. "
-            "Затем спроси, нужна ли помощь ещё, и дождись ответа: пока клиент не ответил, "
-            "end_call вызывать нельзя."
+            "Заявка принята и передана администратору. Клиенту уже сообщено об этом и о том, "
+            "что администратор перезвонит для подтверждения, и задан вопрос, нужна ли помощь "
+            "ещё. Ничего не добавляй, жди ответа клиента; пока он не ответил, end_call "
+            "вызывать нельзя."
         )
+        spoken = [BOOKING_ACCEPTED_SAY]
         if fields.service_id == OTHER_SERVICE_ID:
             result += " Цену не называй: её определит мастер после осмотра."
         if fields.preferred_time is None:
             result += " Точное время не указано: администратор уточнит его при звонке."
-        return ToolOutcome(result)
+            spoken.append(EXACT_TIME_NOTE_SAY)
+        say = " ".join([*spoken, ANYTHING_ELSE_SAY])
+        return ToolOutcome(result, say=say, committed=True)
 
     # --- take_message --------------------------------------------------------------------
 
@@ -340,7 +361,10 @@ class ToolRegistry:
                 "попроси клиента перезвонить позже."
             )
         return ToolOutcome(
-            "Сообщение передано администратору. Скажи клиенту, что администратор свяжется с ним."
+            "Сообщение передано администратору. Клиенту уже сообщено об этом и задан вопрос, "
+            "нужна ли помощь ещё. Ничего не добавляй, жди ответа клиента.",
+            say=f"{MESSAGE_TAKEN_SAY} {ANYTHING_ELSE_SAY}",
+            committed=True,
         )
 
     # --- end_call ------------------------------------------------------------------------
