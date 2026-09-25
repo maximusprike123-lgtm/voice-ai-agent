@@ -11,6 +11,17 @@ from evals.model import Scenario
 
 END_MARKER = "[КОНЕЦ]"
 FALLBACK_FAREWELL = "До свидания."
+FAREWELL_RE = re.compile(
+    r"до свидани|всего доброго|всего хорошего|хорошего дня|доброго дня|всех благ|до встречи"
+    r"|прощайте|счастливо|бывайте|\bпока\b",
+    re.I,
+)
+
+
+def is_farewell(text: str) -> bool:
+    """Does this line say goodbye? Only such a line may end the call."""
+    return bool(FAREWELL_RE.search(text))
+
 
 PROMPT_TEMPLATE = """\
 Ты играешь клиента, который звонит по телефону в детейлинг-центр (автомойка и уход за \
@@ -33,8 +44,10 @@ markdown и эмодзи;
 Как вести себя в ситуациях:
 {behavior}
 
-Когда твоя цель достигнута, ты отказался или положил трубку, попрощайся и допиши в конце \
-реплики {marker}. Пока разговор продолжается, {marker} не пиши.
+Когда твоя цель достигнута, ты отказался или решил положить трубку, скажи «до свидания» и \
+допиши в конце этой реплики {marker}. {marker} пишется ТОЛЬКО вместе с прощанием и только в \
+самой последней реплике. Во всех остальных репликах, даже если ты согласился, подтвердил \
+или поблагодарил, {marker} не пиши: разговор ещё не закончен, пока ты не попрощался.
 Отвечай ТОЛЬКО репликой клиента: без пояснений, без кавычек и без имени говорящего.
 """
 
@@ -53,21 +66,31 @@ def build_persona_prompt(scenario: Scenario) -> str:
 
 
 def clean_reply(raw: str) -> tuple[str, bool]:
-    """(the spoken line, whether the caller is done). Strips speaker labels and quotes."""
+    """(the spoken line, whether the caller hangs up after it). Strips speaker labels, quotes
+    and the end marker. The marker counts ONLY on a farewell line: a caller that writes it
+    while still mid-conversation («Да, всё верно. [КОНЕЦ]») is simply carried on."""
+    text, hung_up, _ = parse_reply(raw)
+    return text, hung_up
+
+
+def parse_reply(raw: str) -> tuple[str, bool, bool]:
+    """(line, hangs up, marker was ignored)."""
     text = raw.strip()
-    done = END_MARKER in text or "[КОНЕЦ" in text
+    had_marker = END_MARKER in text or "[КОНЕЦ" in text
     text = re.sub(r"\[КОНЕЦ\]?", "", text)
     text = re.sub(r"^\s*(клиент|игорь|caller)\s*[:\-—]\s*", "", text, flags=re.I)
     text = text.strip().strip("«»\"'").strip()
-    if done and not text:
+    if had_marker and not text:
         text = FALLBACK_FAREWELL
-    return text, done
+    hangs_up = had_marker and is_farewell(text)
+    return text, hangs_up, had_marker and not hangs_up
 
 
 class SimulatedCaller:
     def __init__(self, llm: LLMClient, scenario: Scenario) -> None:
         self._llm = llm
         self._messages = [Message(Role.SYSTEM, build_persona_prompt(scenario))]
+        self.markers_ignored = 0  # hang-up markers written without a farewell
 
     async def next_utterance(self, agent_said: str) -> tuple[str, bool]:
         """What the caller says next, given what the agent just said; and whether they are done."""
@@ -84,7 +107,8 @@ class SimulatedCaller:
                 break
         else:
             raise CallerError("caller LLM returned an empty reply twice")
-        text, done = clean_reply(raw)
+        text, done, ignored = parse_reply(raw)
+        self.markers_ignored += ignored
         if not text:
             raise CallerError(f"caller reply was empty after cleaning: {raw!r}")
         self._messages.append(Message(Role.ASSISTANT, raw.strip()))

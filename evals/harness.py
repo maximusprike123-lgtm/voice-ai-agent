@@ -34,6 +34,7 @@ async def run_once(
     caller_lines: list[str] = []
     outcome, detail = "completed", ""
     bookings, messages = [], []
+    markers_ignored = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         db_path = (db_dir or Path(tmp)) / f"{scenario.id}_{run_index}.db"
@@ -80,6 +81,7 @@ async def run_once(
                 except Exception as exc:  # keep what was saved so far, report the failure
                     outcome, detail = "infra_error", f"{type(exc).__name__}: {exc}"
 
+                markers_ignored = caller.markers_ignored
                 bookings = [s.booking for s in await rt.store.list_bookings()]
                 messages = [s.message for s in await rt.store.list_messages()]
         except asyncio.CancelledError:
@@ -97,6 +99,7 @@ async def run_once(
         outcome=outcome,
         detail=detail,
         seconds=time.monotonic() - started,
+        markers_ignored=markers_ignored,
     )
 
 

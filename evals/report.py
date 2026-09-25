@@ -1,9 +1,9 @@
 """Turning graded runs into the numbers and text a person reads."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from evals.checks import INVARIANT_NAMES
+from evals.checks import INVARIANT_NAMES, WARNING_NAMES
 from evals.model import CheckResult, RunResult
 
 OK_MARK, BAD_MARK = "✓", "✗"
@@ -13,6 +13,7 @@ OK_MARK, BAD_MARK = "✓", "✗"
 class Graded:
     run: RunResult
     results: list[CheckResult]
+    warnings: list[CheckResult] = field(default_factory=list)  # reported, never pass/fail
 
     @property
     def status(self) -> str:
@@ -37,6 +38,9 @@ class ScenarioSummary:
     seconds: float = 0.0
     checks: dict[str, list[int]] | None = None  # name -> [passed, total] over gradable runs
     examples: dict[str, str] | None = None  # name -> one failure detail
+    warnings: dict[str, list[int]] | None = None  # name -> [runs with the warning, gradable runs]
+    warning_examples: dict[str, str] | None = None
+    markers_ignored: int = 0
 
     @property
     def gradable(self) -> int:
@@ -52,7 +56,10 @@ class ScenarioSummary:
 
 
 def summarize(graded: list[Graded], order: list[str]) -> dict[str, ScenarioSummary]:
-    summaries = {sid: ScenarioSummary(sid, checks={}, examples={}) for sid in order}
+    summaries = {
+        sid: ScenarioSummary(sid, checks={}, examples={}, warnings={}, warning_examples={})
+        for sid in order
+    }
     turn_totals: dict[str, list[int]] = {sid: [] for sid in order}
     for g in graded:
         s = summaries[g.run.scenario_id]
@@ -66,8 +73,15 @@ def summarize(graded: list[Graded], order: list[str]) -> dict[str, ScenarioSumma
         else:
             s.inconclusive += 1
         s.seconds += g.run.seconds
+        s.markers_ignored += g.run.markers_ignored
         turn_totals[g.run.scenario_id].append(g.run.turns)
         if status in ("pass", "fail"):
+            for w in g.warnings:
+                counts = s.warnings.setdefault(w.name, [0, 0])
+                counts[1] += 1
+                counts[0] += not w.passed
+                if not w.passed:
+                    s.warning_examples.setdefault(w.name, w.detail)
             for r in g.results:
                 counts = s.checks.setdefault(r.name, [0, 0])
                 counts[1] += 1
@@ -139,6 +153,32 @@ def format_report(graded: list[Graded], order: list[str]) -> str:
             mark = "" if ok == total else BAD_MARK
             cells.append(f"{mark}{ok}/{total}".rjust(12))
         lines.append(f"{name:<34}" + "".join(cells) + f"{ok_all}/{total_all}".rjust(9))
+
+    if WARNING_NAMES:
+        lines += [
+            "",
+            "WARNING METRICS (not pass/fail: runs where the warning fired / gradable runs)",
+            "",
+        ]
+        for name in WARNING_NAMES:
+            fired = total = 0
+            per_scenario = []
+            for sid in order:
+                f, t = (summaries[sid].warnings or {}).get(name, [0, 0])
+                fired, total = fired + f, total + t
+                if t:
+                    per_scenario.append(f"{sid} {f}/{t}")
+            lines.append(f"{name}: {fired}/{total} runs   ({', '.join(per_scenario)})")
+            example = next(
+                (e for sid in order if (e := (summaries[sid].warning_examples or {}).get(name))), ""
+            )
+            if example:
+                lines.append(f"    e.g. {example[:160]}")
+    ignored = sum(s.markers_ignored for s in summaries.values())
+    lines += [
+        "",
+        f"caller hang-up markers ignored because the line was not a farewell: {ignored}",
+    ]
     return "\n".join(lines)
 
 
@@ -169,6 +209,9 @@ def format_transcript(g: Graded) -> str:
         lines.append(f"  saved message: {m}")
     for r in g.failed_checks:
         lines.append(f"  {BAD_MARK} {r.name}: {r.detail}")
+    for w in g.warnings:
+        if not w.passed:
+            lines.append(f"  ! warning {w.name}: {w.detail}")
     return "\n".join(lines)
 
 
@@ -191,8 +234,12 @@ def to_json(graded: list[Graded]) -> list[dict]:
                 ],
                 "bookings": [{k: str(v) for k, v in vars(b).items()} for b in run.bookings],
                 "messages": [{k: str(v) for k, v in vars(m).items()} for m in run.messages],
+                "markers_ignored": run.markers_ignored,
                 "checks": [
                     {"name": r.name, "passed": r.passed, "detail": r.detail} for r in g.results
+                ],
+                "warnings": [
+                    {"name": w.name, "fired": not w.passed, "detail": w.detail} for w in g.warnings
                 ],
             }
         )

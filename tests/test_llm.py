@@ -471,3 +471,26 @@ async def test_usage_hook_and_extra_body_combine():
 
     assert captured["provider"] == {"sort": "latency"}
     assert captured["stream_options"] == {"include_usage": True}
+
+
+async def test_usage_hook_also_gets_the_serving_provider_when_the_backend_names_one():
+    seen = []
+    body = sse(
+        chunk({"content": "Да"}, finish_reason="stop"),
+        {"choices": [], "usage": USAGE, "provider": "Together"},
+        "[DONE]",
+    )
+    client = make_client(lambda r: httpx.Response(200, content=body), usage_hook=seen.append)
+
+    [_ async for _ in client.stream([Message(Role.USER, "hi")])]
+
+    assert seen == [{**USAGE, "provider": "Together"}]
+
+
+async def test_usage_hook_payload_is_unchanged_when_no_provider_is_reported():
+    seen = []
+    client = make_client(
+        lambda r: httpx.Response(200, content=usage_stream()), usage_hook=seen.append
+    )
+    [_ async for _ in client.stream([Message(Role.USER, "hi")])]
+    assert seen == [USAGE] and "provider" not in seen[0]

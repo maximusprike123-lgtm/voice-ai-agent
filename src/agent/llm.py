@@ -141,8 +141,10 @@ class OpenAICompatibleLLMClient:
     # override the fields this client owns.
     extra_body: dict[str, Any] | None = None
     # Optional: called with the backend's `usage` object (prompt_tokens, completion_tokens, ...)
-    # once per request, e.g. for cost accounting. Setting it makes the client ask for usage in
-    # the stream (`stream_options.include_usage`) and read the stream to its end to receive it.
+    # once per request, e.g. for cost accounting, plus a "provider" key when the backend says
+    # which upstream provider served the request (OpenRouter does). Setting it makes the client
+    # ask for usage in the stream (`stream_options.include_usage`) and read the stream to its
+    # end to receive it.
     usage_hook: Callable[[dict[str, Any]], None] | None = None
     timeout_seconds: float = 60.0
     _client: httpx.AsyncClient | None = field(default=None, repr=False, compare=False)
@@ -222,7 +224,8 @@ class OpenAICompatibleLLMClient:
 
             usage = chunk.get("usage")
             if usage and self.usage_hook is not None:
-                self._report_usage(usage)
+                provider = chunk.get("provider")
+                self._report_usage({**usage, "provider": provider} if provider else usage)
 
             choices = chunk.get("choices") or []
             if not choices or finished:

@@ -32,6 +32,7 @@ class RunResult:
     outcome: str  # "completed" | "inconclusive" | "infra_error"
     detail: str = ""
     seconds: float = 0.0
+    markers_ignored: int = 0  # caller hang-up markers that came without a farewell (ignored)
 
     @property
     def turns(self) -> int:

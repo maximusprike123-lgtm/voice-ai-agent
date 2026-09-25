@@ -22,20 +22,34 @@ import httpx
 from agent.business import load_business_config
 from agent.llm import OpenAICompatibleLLMClient
 from agent.settings import Settings, get_settings
-from evals.checks import grade
+from evals.calibrate import calibrate_model, format_calibration
+from evals.checks import grade, run_warnings
 from evals.cost import Price, UsageMeter, estimate_cost, fetch_prices
 from evals.harness import run_once
 from evals.model import CheckContext, Scenario
 from evals.report import Graded, format_report, format_transcript, to_json
 from evals.scenarios import BY_ID, SCENARIOS
+from evals.telemetry import RecordingLLM, RequestLog, format_providers
 
-# Cheap, non-DeepSeek families, best first (measured: all pass this account's privacy filters).
+# Cheap, non-DeepSeek families, best first. The order comes from `--calibrate-caller`
+# (2026-09-25, 3 samples x 66 probes each): gpt-4.1-nano and llama-3.3 never hung up
+# prematurely and ended calls properly; mistral was as clean but had one request error;
+# gemini-2.5-flash-lite was fast but hung up prematurely in 4/66 replies. All pass this
+# account's privacy filters.
 CALLER_MODEL_CANDIDATES = (
-    "google/gemini-2.5-flash-lite",
     "openai/gpt-4.1-nano",
-    "mistralai/mistral-small-3.2-24b-instruct",
     "meta-llama/llama-3.3-70b-instruct",
+    "mistralai/mistral-small-3.2-24b-instruct",
+    "google/gemini-2.5-flash-lite",
 )
+# Everything worth calibrating (see --calibrate-caller): the four above plus a few more.
+CALIBRATION_CANDIDATES = (
+    *CALLER_MODEL_CANDIDATES,
+    "openai/gpt-4o-mini",
+    "google/gemma-3-27b-it",
+    "qwen/qwen3-30b-a3b-instruct-2507",
+)
+CALIBRATION_SAMPLES = 3
 CALLER_TEMPERATURE = 0.7
 CALLER_MAX_TOKENS = 150
 DEFAULT_RUNS = 5
@@ -110,6 +124,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-pass-rate", type=float, help="exit 1 if a scenario is below this")
     parser.add_argument("--out", type=Path, help="results directory (default data/evals/<time>)")
     parser.add_argument("--list", action="store_true", help="list the scenarios and exit")
+    parser.add_argument(
+        "--calibrate-caller",
+        action="store_true",
+        help="measure candidate caller models (premature hang-ups etc.) and exit",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=CALIBRATION_SAMPLES,
+        help="samples per probe for --calibrate-caller",
+    )
     return parser
 
 
@@ -145,7 +170,7 @@ async def sweep(
                 caller_llm=caller_llm,
                 clock=clock,
             )
-            g = Graded(result, grade(result, scenario.checks, ctx))
+            g = Graded(result, grade(result, scenario.checks, ctx), run_warnings(result, ctx))
             graded.append(g)
             finished += 1
             failed = ", ".join(r.name for r in g.failed_checks) if g.status == "fail" else ""
@@ -171,7 +196,37 @@ def role_prices(prices: dict[str, Price], agent_model: str, caller_model: str) -
     return out
 
 
+async def calibrate_callers(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    candidates = [args.caller_model] if args.caller_model else list(CALIBRATION_CANDIDATES)
+    prices = await fetch_prices(settings.llm_base_url, candidates)
+    print(f"calibrating {len(candidates)} caller models, {args.samples} samples per probe")
+    results = []
+    for model in candidates:
+        client = OpenAICompatibleLLMClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key.get_secret_value(),
+            model=model,
+            extra_body={"temperature": CALLER_TEMPERATURE, "max_tokens": CALLER_MAX_TOKENS},
+            timeout_seconds=30,
+        )
+        result = await calibrate_model(client, model, list(SCENARIOS), args.samples)
+        await client.aclose()
+        results.append(result)
+        price = prices.get(model)
+        print(
+            f"  {model}: premature {result.premature}/{result.premature_of}, "
+            f"terminates {result.terminates}/{result.terminates_of}"
+            + (f", ${price[0]:.3f}/${price[1]:.3f} per M" if price else ""),
+            flush=True,
+        )
+    print(format_calibration(results))
+    return 0
+
+
 async def amain(args: argparse.Namespace) -> int:
+    if args.calibrate_caller:
+        return await calibrate_callers(args)
     settings = get_settings()
     scenarios = select_scenarios(args.scenarios)
     total_runs = len(scenarios) * args.runs
@@ -189,7 +244,7 @@ async def amain(args: argparse.Namespace) -> int:
         agent_model,
         caller_model,
     )
-    estimate = estimate_cost(total_runs, prices)
+    estimate = estimate_cost([sc.id for sc in scenarios for _ in range(args.runs)], prices)
 
     print(f"agent under test : {agent_model}  (extra_body={settings.llm_extra_body})")
     print(f"simulated caller : {caller_model}  [{note}]")
@@ -228,6 +283,8 @@ async def amain(args: argparse.Namespace) -> int:
         usage_hook=meter.hook("agent"),
         timeout_seconds=settings.llm_timeout_seconds,
     )
+    request_log = RequestLog()
+    agent_llm = RecordingLLM(agent_llm, request_log)
     same_model = caller_model == agent_model
     caller_llm = OpenAICompatibleLLMClient(
         base_url=settings.llm_base_url,
@@ -265,9 +322,14 @@ async def amain(args: argparse.Namespace) -> int:
     graded.sort(key=lambda g: ([s.id for s in scenarios].index(g.run.scenario_id), g.run.run_index))
     order = [s.id for s in scenarios]
 
+    await request_log.drain()
+    limit = settings.llm_first_event_timeout_seconds
     report = format_report(graded, order)
     print(report)
+    providers = format_providers(request_log.records, limit)
+    print(providers)
     print(cost_report(meter, prices, order))
+    report = report + "\n" + providers
 
     out_dir = args.out or Path("data") / "evals" / started.strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -275,10 +337,14 @@ async def amain(args: argparse.Namespace) -> int:
     (out_dir / "results.json").write_text(
         json.dumps(to_json(graded), ensure_ascii=False, indent=1), encoding="utf-8"
     )
+    (out_dir / "requests.json").write_text(
+        json.dumps([r.__dict__ for r in request_log.records], ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
     (out_dir / "transcripts.txt").write_text(
         "\n\n".join(format_transcript(g) for g in graded), encoding="utf-8"
     )
-    print(f"\nsaved: {out_dir}/ (report.txt, results.json, transcripts.txt)")
+    print(f"\nsaved: {out_dir}/ (report.txt, results.json, requests.json, transcripts.txt)")
 
     if args.show_failures:
         shown: dict[str, int] = {}
@@ -333,8 +399,8 @@ def main(argv: list[str] | None = None) -> int:
         for s in SCENARIOS:
             print(f"{s.id:<24}{s.description}")
         return 0
-    if args.runs < 1 or args.concurrency < 1:
-        print("--runs and --concurrency must be at least 1", file=sys.stderr)
+    if args.runs < 1 or args.concurrency < 1 or args.samples < 1:
+        print("--runs, --concurrency and --samples must be at least 1", file=sys.stderr)
         return 2
     return asyncio.run(amain(args))
 

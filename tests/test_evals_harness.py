@@ -112,7 +112,10 @@ def test_every_persona_prompt_builds_without_leftover_placeholders(scenario):
         ("  Клиент: Меня зовут Игорь.  ", "Меня зовут Игорь.", False),
         ("«Да, всё верно.»", "Да, всё верно.", False),
         ('"Нет, спасибо. До свидания." [КОНЕЦ]', "Нет, спасибо. До свидания.", True),
-        ("Всё, надоели. [КОНЕЦ]", "Всё, надоели.", True),
+        ("Всё, надоели, до свидания. [КОНЕЦ]", "Всё, надоели, до свидания.", True),
+        ("Да, всё верно. [КОНЕЦ]", "Да, всё верно.", False),  # a marker without a farewell
+        ("Спасибо большое! [КОНЕЦ]", "Спасибо большое!", False),
+        ("Хорошо, тогда пока. [КОНЕЦ]", "Хорошо, тогда пока.", True),
         ("[КОНЕЦ]", FALLBACK_FAREWELL, True),
         ("До свидания! [КОНЕЦ", "До свидания!", True),
     ],
@@ -211,7 +214,7 @@ async def test_a_whole_booking_call_produces_the_records_and_the_ordered_event_l
 
 async def test_the_call_ends_when_the_caller_is_done_even_if_the_agent_does_not_hang_up(tmp_path):
     agent = ScriptedLLM(text("Здравствуйте, слушаю вас."), text("Всего доброго."))
-    caller = ScriptedLLM(text("Сколько стоит керамика?"), text("Спасибо. [КОНЕЦ]"))
+    caller = ScriptedLLM(text("Сколько стоит керамика?"), text("Спасибо, до свидания. [КОНЕЦ]"))
 
     result = await run(BY_ID["price_only"], agent, caller, tmp_path)
 
@@ -298,7 +301,7 @@ async def test_each_run_gets_its_own_database_and_the_clock_is_fixed(tmp_path):
             tool_round("prepare_booking", BOOKING_ARGS), tool_round("confirm_booking")
         )
 
-    caller_lines = [text("Запишите меня."), text("Да. [КОНЕЦ]")]
+    caller_lines = [text("Запишите меня."), text("Да, до свидания. [КОНЕЦ]")]
     first = await run(
         BY_ID["happy_path_booking"], booking_agent(), ScriptedLLM(*caller_lines), tmp_path, 0
     )
@@ -357,12 +360,28 @@ def test_total_cost_needs_a_price_for_every_role():
     assert meter.total_cost({"agent": (0.15, 0.6), "caller": (0.1, 0.4)}) == pytest.approx(0.15)
 
 
-def test_estimate_scales_with_the_number_of_runs_and_needs_both_prices():
+def test_estimates_are_per_scenario_and_long_booking_calls_cost_more_than_short_ones():
     prices = {"agent": (0.15, 0.6), "caller": (0.1, 0.4)}
-    one = estimate_cost(1, prices)
-    assert one == pytest.approx(0.15 * 0.025 + 0.6 * 0.0007 + 0.1 * 0.009 + 0.4 * 0.0005)
-    assert estimate_cost(50, prices) == pytest.approx(50 * one)
-    assert estimate_cost(50, {"agent": (0.15, 0.6)}) is None
+    booking = estimate_cost(["happy_path_booking"], prices)
+    short = estimate_cost(["address_only"], prices)
+
+    assert booking > 2 * short > 0
+    assert estimate_cost(
+        ["happy_path_booking"] * 5 + ["address_only"] * 5, prices
+    ) == pytest.approx(5 * booking + 5 * short)
+    assert estimate_cost([], prices) == 0
+    assert estimate_cost(["happy_path_booking"], {"agent": (0.15, 0.6)}) is None  # no caller price
+
+
+def test_an_unknown_scenario_is_estimated_pessimistically():
+    prices = {"agent": (0.15, 0.6), "caller": (0.1, 0.4)}
+    assert estimate_cost(["made_up"], prices) == estimate_cost(["happy_path_booking"], prices)
+
+
+def test_every_scenario_has_an_estimate():
+    from evals.cost import ESTIMATED_TOKENS_PER_RUN
+
+    assert {s.id for s in SCENARIOS} <= set(ESTIMATED_TOKENS_PER_RUN)
 
 
 async def test_prices_come_from_the_openrouter_model_list():
@@ -602,7 +621,7 @@ def test_dry_run_prints_the_plan_and_the_estimate_and_makes_no_llm_calls(cli_env
 
     out = capsys.readouterr().out
     assert "agent under test : deepseek/deepseek-v4.1-flash" in out
-    assert "simulated caller : google/gemini-2.5-flash-lite" in out and "would be probed" in out
+    assert "simulated caller : openai/gpt-4.1-nano" in out and "would be probed" in out
     assert "1 scenarios x 3 runs = 3 calls" in out
     assert "estimated cost   : about $" in out
 
@@ -633,7 +652,7 @@ async def test_a_sweep_runs_scenarios_round_robin_and_grades_each_run(tmp_path):
     class Caller(ScriptedLLM):
         async def stream(self, messages, tools=None):
             self.calls.append(list(messages))
-            for event in text("Понятно, спасибо. [КОНЕЦ]"):
+            for event in text("Понятно, спасибо, до свидания. [КОНЕЦ]"):
                 yield event
 
     results = await evals_main.sweep(
@@ -693,7 +712,7 @@ async def test_sweep_grading_uses_the_scenario_checks_and_the_invariants(tmp_pat
 
     class Caller(ScriptedLLM):
         async def stream(self, messages, tools=None):
-            for event in text("Спасибо. [КОНЕЦ]"):
+            for event in text("Спасибо, до свидания. [КОНЕЦ]"):
                 yield event
 
     [result] = await evals_main.sweep(
@@ -711,3 +730,259 @@ async def test_sweep_grading_uses_the_scenario_checks_and_the_invariants(tmp_pat
     assert result.status == "fail"
     names = {r.name for r in result.results}
     assert set(INVARIANT_NAMES) <= names and "quotes_25000" in names
+
+
+# --- Farewell-gated hang-up -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "farewell"),
+    [
+        ("Нет, спасибо. До свидания.", True),
+        ("Всего доброго!", True),
+        ("Хорошего дня.", True),
+        ("Ну всё, пока.", True),
+        ("Прощайте", True),
+        ("Спасибо большое!", False),
+        ("Да, всё верно.", False),
+        ("Пока не знаю, подумаю.", True),  # «пока» as a farewell word: accepted, documented
+        ("Покажите цены, пожалуйста.", False),
+        ("", False),
+    ],
+)
+def test_is_farewell(line, farewell):
+    from evals.caller import is_farewell
+
+    assert is_farewell(line) is farewell
+
+
+async def test_a_marker_without_a_farewell_is_ignored_counted_and_the_call_goes_on():
+    llm = ScriptedLLM(text("Да, всё верно. [КОНЕЦ]"), text("Нет, спасибо. До свидания. [КОНЕЦ]"))
+    caller = SimulatedCaller(llm, BY_ID["happy_path_booking"])
+
+    first = await caller.next_utterance("Всё верно?")
+    second = await caller.next_utterance("Могу ещё чем-то помочь?")
+
+    assert first == ("Да, всё верно.", False) and second == ("Нет, спасибо. До свидания.", True)
+    assert caller.markers_ignored == 1
+
+
+def test_the_persona_prompt_says_the_marker_belongs_only_with_a_farewell():
+    prompt = build_persona_prompt(BY_ID["happy_path_booking"])
+    assert "ТОЛЬКО вместе с прощанием" in prompt and "до свидания" in prompt
+
+
+async def test_the_harness_carries_on_after_a_premature_marker_and_reports_it(tmp_path):
+    agent = ScriptedLLM(
+        tool_round("prepare_booking", BOOKING_ARGS),
+        tool_round("confirm_booking"),
+        [TextDelta("Всего доброго!"), *tool_round("end_call")],
+    )
+    caller = ScriptedLLM(
+        text("Запишите меня. [КОНЕЦ]"),  # premature: no farewell
+        text("Да, всё верно. [КОНЕЦ]"),  # premature again
+        text("Нет, спасибо. До свидания. [КОНЕЦ]"),
+    )
+
+    result = await run(BY_ID["happy_path_booking"], agent, caller, tmp_path)
+
+    assert result.outcome == "completed" and result.turns == 3 and len(result.bookings) == 1
+    assert result.markers_ignored == 2 and result.ended_call()
+
+
+async def test_a_caller_that_never_says_goodbye_runs_into_the_turn_cap_as_inconclusive(tmp_path):
+    scenario = replace(BY_ID["price_only"], max_turns=3)
+    agent = ScriptedLLM(*[text("Слушаю вас.")] * 3)
+    caller = ScriptedLLM(*[text("Спасибо. [КОНЕЦ]")] * 3)
+
+    result = await run(scenario, agent, caller, tmp_path)
+
+    assert result.outcome == "inconclusive" and result.markers_ignored == 3
+
+
+# --- Calibration ----------------------------------------------------------------------------------
+
+
+def test_probes_cover_the_start_of_every_scenario_and_the_booking_flow_for_booking_ones():
+    from evals.calibrate import BOOKING_SCENARIOS, probes_for
+
+    booking = probes_for(BY_ID["happy_path_booking"])
+    assert [p.label for p in booking] == ["start", "name", "readback", "closing"]
+    assert [p.must_not_end for p in booking] == [True, True, True, False]
+    assert [p.label for p in probes_for(BY_ID["price_only"])] == ["start"]
+    assert set(BY_ID) >= BOOKING_SCENARIOS
+
+
+async def test_calibration_counts_premature_markers_and_proper_endings():
+    from evals.calibrate import calibrate_model
+
+    class Caller:
+        """Ends the call on every line (bad), except it also says goodbye at the closing."""
+
+        async def stream(self, messages, tools=None):
+            for event in text(
+                "Да. [КОНЕЦ]"
+                if "Могу ещё" not in messages[-1].content
+                else "Нет, до свидания. [КОНЕЦ]"
+            ):
+                yield event
+
+    result = await calibrate_model(Caller(), "x/bad", [BY_ID["happy_path_booking"]], samples=2)
+
+    assert (result.premature, result.premature_of) == (6, 6)  # 3 must-not-end probes x 2 samples
+    assert (result.terminates, result.terminates_of) == (2, 2)
+    assert result.premature_rate == 1.0 and result.terminate_rate == 1.0
+
+
+async def test_a_well_behaved_caller_scores_zero_premature_and_full_termination():
+    from evals.calibrate import calibrate_model
+
+    class Good:
+        async def stream(self, messages, tools=None):
+            last = messages[-1].content
+            reply = "Нет, спасибо. До свидания. [КОНЕЦ]" if "Могу ещё" in last else "Хорошо."
+            for event in text(reply):
+                yield event
+
+    result = await calibrate_model(Good(), "x/good", [BY_ID["happy_path_booking"]], samples=3)
+
+    assert result.premature == 0 and result.terminates == result.terminates_of == 3
+
+
+async def test_empty_replies_and_failures_are_counted_not_raised():
+    from evals.calibrate import calibrate_model
+
+    class Empty:
+        async def stream(self, messages, tools=None):
+            for event in text(""):
+                yield event
+
+    class Broken:
+        async def stream(self, messages, tools=None):
+            raise LLMError("HTTP 404")
+            yield  # pragma: no cover
+
+    empty = await calibrate_model(Empty(), "x/empty", [BY_ID["price_only"]], samples=2)
+    broken = await calibrate_model(Broken(), "x/broken", [BY_ID["price_only"]], samples=2)
+
+    assert empty.empty == 2 and empty.total == 2
+    assert "404" in broken.error and broken.total == 0
+
+
+def test_candidates_are_ranked_by_premature_rate_then_termination_then_empties_then_speed():
+    from evals.calibrate import CandidateResult, format_calibration
+
+    def result(model, premature, terminates, latency, empty=0, error=""):
+        return CandidateResult(model, premature, 20, terminates, 5, empty, 25, [latency], error)
+
+    ranked = [
+        result("x/slow-clean", 0, 5, 3.0),
+        result("x/fast-clean", 0, 5, 1.0),
+        result("x/never-ends", 0, 2, 0.5),
+        result("x/premature", 9, 5, 0.4),
+        result("x/dead", 0, 0, 0.1, error="HTTP 404"),
+    ]
+    ranked[-1].total = 0
+    ranked[1].errors = 0
+
+    text_ = format_calibration(list(reversed(ranked)))
+
+    assert text_.index("x/fast-clean") < text_.index("x/slow-clean") < text_.index("x/never-ends")
+    assert text_.index("x/never-ends") < text_.index("x/premature")
+    assert "unusable: HTTP 404" in text_
+    assert "recommended order: x/fast-clean, x/slow-clean, x/never-ends, x/premature" in text_
+
+
+def test_calibrate_mode_prints_the_ranking(monkeypatch, capsys, tmp_path):
+    from evals.calibrate import CandidateResult
+
+    monkeypatch.setattr(evals_main, "get_settings", lambda: make_settings(tmp_path))
+
+    async def fake_prices(base_url, models):
+        return {m: (0.1, 0.4) for m in models}
+
+    async def fake_calibrate(llm, model, scenarios, samples, concurrency=8):
+        return CandidateResult(model, 0, 10, 4, 5, 0, 15, [1.0])
+
+    monkeypatch.setattr(evals_main, "fetch_prices", fake_prices)
+    monkeypatch.setattr(evals_main, "calibrate_model", fake_calibrate)
+
+    assert (
+        evals_main.main(["--calibrate-caller", "--caller-model", "a/model", "--samples", "1"]) == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "SIMULATED CALLER CALIBRATION" in out and "recommended order: a/model" in out
+
+
+# --- Warnings and ignored markers in the report ---------------------------------------------------
+
+
+def with_warning(
+    g: Graded, fired: bool, detail="said 'Уточню: ...' before prepare_booking"
+) -> Graded:
+    g.warnings = [CheckResult("own_recap_before_prepare", not fired, detail if fired else "")]
+    return g
+
+
+def test_warnings_are_counted_over_gradable_runs_and_never_change_the_status():
+    runs = [
+        with_warning(graded("alpha", "pass"), fired=True),
+        with_warning(graded("alpha", "pass"), fired=False),
+        with_warning(graded("alpha", "fail", failed=["x"]), fired=True),
+        with_warning(graded("alpha", "infra_error"), fired=True),  # not gradable: ignored
+    ]
+
+    assert [g.status for g in runs] == ["pass", "pass", "fail", "infra_error"]
+    s = summarize(runs, ["alpha"])["alpha"]
+    assert s.warnings == {"own_recap_before_prepare": [2, 3]}
+    assert s.passed == 2 and s.failed == 1  # the warnings did not fail anything
+
+
+def test_the_report_has_a_warning_section_and_the_ignored_marker_count():
+    runs = [with_warning(graded("alpha", "pass"), fired=True), graded("beta", "pass")]
+    runs[0].run.markers_ignored = 2
+    runs[1].run.markers_ignored = 1
+
+    report = format_report(runs, ["alpha", "beta"])
+
+    assert "WARNING METRICS" in report and "own_recap_before_prepare: 1/1 runs" in report
+    assert "alpha 1/1" in report and "e.g. said 'Уточню" in report
+    assert "markers ignored because the line was not a farewell: 3" in report
+
+
+def test_the_transcript_and_json_show_warnings():
+    g = with_warning(graded("alpha", "pass"), fired=True)
+    assert "! warning own_recap_before_prepare" in format_transcript(g)
+    dumped = to_json([g])[0]
+    assert dumped["warnings"] == [
+        {
+            "name": "own_recap_before_prepare",
+            "fired": True,
+            "detail": "said 'Уточню: ...' before prepare_booking",
+        }
+    ]
+    assert "markers_ignored" in dumped
+
+
+def test_one_transient_request_error_does_not_disqualify_a_candidate():
+    from evals.calibrate import CandidateResult
+
+    clean = CandidateResult("x/clean", 0, 20, 5, 5, 0, 25, [2.0])
+    hiccup = CandidateResult("x/hiccup", 0, 20, 5, 5, 0, 25, [2.0], "HTTP 502", 1)
+    dead = CandidateResult("x/dead", 0, 0, 0, 0, 0, 0, [], "HTTP 404", 30)
+
+    order = sorted([dead, hiccup, clean], key=CandidateResult.sort_key)
+
+    assert [r.model for r in order] == ["x/clean", "x/hiccup", "x/dead"]
+
+
+def test_the_default_caller_is_the_best_calibrated_model():
+    assert evals_main.CALLER_MODEL_CANDIDATES[0] == "openai/gpt-4.1-nano"
+
+
+def test_the_default_sweep_estimate_matches_the_measured_cost_of_the_baseline():
+    """50 runs cost $0.156 at these prices (2026-09-25); the estimate must stay within ~15%."""
+    prices = {"agent": (0.15, 0.6), "caller": (0.1, 0.4)}
+    estimate = estimate_cost([s.id for s in SCENARIOS for _ in range(5)], prices)
+    assert 0.156 * 0.85 < estimate < 0.156 * 1.15

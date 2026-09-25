@@ -238,16 +238,40 @@ guard**: `confirm_booking` returns `ОШИБКА` if the draft was prepared in t
 the model cannot skip the caller's «да» by calling prepare + confirm together. pytest now
 puts the repo root on `pythonpath` so tests can import `evals`.
 
-**Baseline sweep (2026-09-25, DeepSeek v4.1 flash agent, Gemini flash-lite caller, 50 runs,
-~$0.06, ~4 min): raw pass rate 16/46 gradable = 35%** — happy_path_booking 60%,
-approximate_time 0%, changes_mind 25%, hidden_caller_id 0%, service_not_listed 0%,
-question_outside_faq 0%, price_only 100%, rude_offtopic 100%, address_only 0%,
-sunday_closed 40%; 4 infra errors. **The raw numbers are dominated by harness artifacts, not
-by the agent** (see Known open issues). Invariants: 46/46 for every one except «no
-записал before confirm» (44/46). Nothing was tuned after the sweep.
+**1.10 harness fixes (after the first baseline; agent/prompt untouched):** the hang-up marker
+`[КОНЕЦ]` counts only on a farewell line (otherwise it is stripped, counted as "ignored" and the
+call goes on; the persona prompt now says so); `agent_ended_call` is required only if the
+caller's last line was a farewell; `changes_mind` asserts outcomes (one booking, the final
+slot, `abandoned_slot_not_saved`) instead of `prepared_at_least_2`; `service_not_listed`: the
+persona clearly wants to BOOK, asserts an `other`/`ppf` booking and no message; the agent's own
+recap before `prepare_booking` is a **warning metric** (reported per scenario, never pass/fail);
+cost estimates are per scenario and match the measured cost within ~7%; the caller model is now
+chosen by measurement: `python -m evals --calibrate-caller` (7 candidates, 66 probes each:
+premature hang-ups on lines that must not end the call, ability to end the call, empties,
+latency): gpt-4.1-nano 0/66 premature + 17/18 terminates, llama-3.3-70b 0/66 + 17/18,
+gpt-4o-mini 0/66 + 15/18, gemma-3-27b 0/66 + 9/18, gemini-2.5-flash-lite 4/66 + 18/18,
+qwen3-30b 6/66, mistral-small-3.2 0/65 (one request error). Default order is now gpt-4.1-nano,
+llama-3.3-70b, mistral-small-3.2, gemini-2.5-flash-lite. New request telemetry
+(`evals/telemetry.py`): every agent LLM request is logged with the serving provider and its
+first-event latency; a request the engine gave up on is left running in the background
+(30s cap) so its provider and true latency are still recorded. `LLMClient`'s `usage_hook` now
+also receives the serving `provider` when the backend names one.
 
-**Next:** decide what to do about the baseline (see the open issue «1.10 baseline is
-contaminated»), then step 2 (STT/TTS, local mic).
+**Baseline sweep 1 (before the fixes, Gemini caller): 35% raw, dominated by caller artifacts.
+Baseline sweep 2 (after the fixes, 2026-09-25, gpt-4.1-nano caller, 50 runs, $0.156, 0 infra
+errors, 1 caller marker ignored): raw pass rate 36/50 = 72%** — happy_path_booking 3/5,
+approximate_time 3/5, changes_mind 4/5, hidden_caller_id 0/5, service_not_listed 3/5,
+question_outside_faq 5/5, price_only 5/5, rude_offtopic 5/5, address_only 3/5,
+sunday_closed 5/5. Invariants: no_foreign_script 50/50, no_invented_prices 50/50,
+no_slot_confirmed_claim 50/50, confirm_only_after_readback 50/50, no_premature_confirm_attempt
+50/50, end_call_not_with_accepted_save 50/50, **no_записал_before_confirm 47/50,
+no_full_phone_spoken 45/50**. Warning `own_recap_before_prepare`: 19/50 runs. All 252 agent
+requests were served by Together (the `LLM_EXTRA_BODY` pin worked; Fireworks fallback never
+needed): first event p50 1.27s, p90 2.22s, max 5.66s; exactly one round exceeded the 4s limit
+and was given up on (service_not_listed, Together, 5.7s). Nothing was tuned after either sweep.
+
+**Next:** decide on the proposed extra harness fixes and on the agent findings (see the open issue
+«1.10 baseline 2»), then step 2 (STT/TTS, local mic).
 
 **Remaining roadmap:** step 2 (STT/TTS, local mic) and step 3 (Asterisk + AudioSocket on the
 real VPS).
@@ -334,42 +358,49 @@ real VPS).
   `alibaba`, `streamlake`, `gmicloud` and `atlas-cloud` from routing; pinning `DeepSeek` fails
   with HTTP 404 "No endpoints found". Good for customer data (names, phone numbers), but the
   eligible set is US/EU infra providers, and changing those settings changes the latency picture.
-- **1.10 baseline is contaminated by the simulated caller and by some checks: do NOT read the
-  raw 35% as the agent's quality.** Triage of the 30 failed runs from transcripts:
-  (a) **~19 = the caller LLM hung up too early** — Gemini flash-lite appends `[КОНЕЦ]` to its
-  very first line (measured: 9/10 samples for hidden_caller_id, 5/10 for question_outside_faq,
-  0/10 for happy_path/address_only) or to «Да, всё верно.», so the run ends while the agent's
-  question («Как вас зовут?») is unanswered or before the agent could hang up. These runs are
-  counted "completed" and fail almost every check; they should be inconclusive.
-  (b) **~10 = check/scenario design:** `agent_ended_call` in address_only (5/5 fail: the caller
-  only says «Спасибо большое!», no farewell, the agent asks «Что-то ещё подсказать?»; not
-  obviously wrong); `prepared_at_least_2` in changes_mind (the caller changed its mind at the
-  agent's OWN informal recap («Уточню: … Верно?») before the first `prepare_booking`, so there
-  was only one prepare although the final booking was exactly right: Monday morning, one
-  record); service_not_listed 0/5 (the persona asks «вы такое делаете?», the agent takes a
-  `take_message` instead of booking `other`, which is defensible and the persona never says it
-  wants to book).
-  (c) **Real agent findings (few):** «Хорошо, записал» / «всё записал» said before the booking
-  was confirmed, 2/4 gradable approximate_time runs (a prompt rule violation); the model's
-  own redundant recap («Уточню: … Верно?») before `prepare_booking` (seen in changes_mind and
-  approximate_time); after a plain «спасибо» without a farewell it does not call `end_call`.
-  **Proposed harness fixes, NOT applied (baseline left as measured, waiting for approval):**
-  honor `[КОНЕЦ]` only on a farewell line and otherwise strip it and continue (or mark the run
-  inconclusive); re-probe candidate caller models for their marker rate (gpt-4.1-nano, mistral)
-  and pick by it; make `agent_ended_call` conditional on the caller's last line being a
-  farewell; replace `prepared_at_least_2` with outcome checks (one booking, final slot, none
-  for the abandoned slot); accept take_message OR an `other`/`ppf` booking in
-  service_not_listed, or make the persona state that it wants to book; optionally add a check
-  against the agent's own recap before `prepare_booking`.
-- **Infra noise in the sweep:** 10 LLM rounds timed out at the 4s first-token limit (OpenRouter,
-  Together/Fireworks order) across ~190 agent requests; the engine's retry rescued 6 and the
-  other 4 became failed turns, so 4/50 runs were infra errors (8%), in line with the
-  latency-study tail. `--concurrency 4` may add some load.
-- **The 1.10 cost estimate is 2.5x too high:** actual ~$0.061 for 50 runs (~12.5k agent tokens
-  and ~2k caller tokens per run) versus the estimate's 25k + 9k; adjust
-  `ESTIMATED_TOKENS_PER_RUN` in `evals/cost.py`.
+- **1.10 baseline 2: what the 14 failures of the second sweep are (triage from transcripts;
+  read this, not the raw 72%).** *Harness/check artifacts (5 runs, not agent faults):* the caller
+  volunteers its phone number together with its name, so `asks_for_a_number` (hidden_caller_id)
+  can never fire (0/5 by construction; 2 more runs fail only on it); a caller line that says
+  goodbye in the SAME turn as the read-back «да» ends the run before the agent can answer, and
+  the agent legitimately cannot hang up in the turn of an accepted save (hidden #1); a run ended
+  on the caller's goodbye while the agent's question («Извините, я ещё не отправил заявку…
+  Уточните…» / «как вас зовут?») was still pending (hidden #4, address_only #2); the caller
+  improvised a metro-route question, so a `take_message` broke `no_messages` (address_only #0).
+  *Proposed further harness fixes, NOT applied:* end the run on a farewell only if the agent's
+  reply does not end with a question (let the caller answer it); `asks_for_a_number` only when
+  the caller had not already given a number; `agent_ended_call` not required when the farewell
+  came in a turn with an accepted save; drop `no_messages` from address_only (or accept a
+  message for an unanswerable follow-up); add the invariant below.
+  *Real agent findings (9 runs):* (1) **the agent said «Заявка принята, администратор
+  перезвонит…» WITHOUT calling `confirm_booking` (service_not_listed #0): the caller believes the
+  booking is taken, nothing was saved (1/50). No invariant catches it yet (`no_slot_confirmed_claim`
+  only looks for «подтверждена»); add `no_acceptance_claim_without_save` (any «заявка принята /
+  передана администратору / сообщение передано» spoken before a committed tool of that run).**
+  (2) The agent **reads out the full phone number** («Номер — 8 916 123 45 67», «…восемь девятьсот
+  шестнадцать…»), 5/50 runs (happy_path 2, approximate_time 2, hidden_caller_id 1), despite the
+  prompt rule; the code-built read-back never does. (3) «Записал / Записала (номер)» before the
+  booking is confirmed, 3/50. (4) With a HIDDEN caller ID it said «Ваш номер телефона
+  определился, записать вас на номер, с которого вы звоните?» (hidden #2). (5) service_not_listed
+  #3: the caller asked to book twice, the agent insisted on `take_message` (an `other` booking
+  was never offered). (6) Own recap before `prepare_booking` in 19/50 runs (38%; «Всё верно?»,
+  «Уточню: …»), which also makes callers answer «да» early (and even say goodbye) before the
+  real read-back. The invariants that are code-enforced held everywhere: no foreign script, no
+  invented price, no confirm before a read-back, no premature confirm attempt, no hang-up in a
+  save turn. These findings suggest moving more into code (e.g. a code-side check of spoken
+  text for phone digits / acceptance claims, or dropping the model's own recap by prompt).
+- **Infra noise:** sweep 1: 10 first-token timeouts in ~190 requests (6 rescued by the retry, 4
+  failed turns = 8% of runs); sweep 2: 1 timeout in 252 requests, 0 failed turns. Both sweeps
+  had the Together/Fireworks pin, and in sweep 2 every request was served by Together, so the
+  tail varies over time (evening MSK) rather than with the pin; the providers of sweep 1's
+  timeouts were not recorded (unrecoverable). Keep the request telemetry on.
+- **Background-process gotcha for long sweeps in this environment:** a sweep started with a
+  plain `&` can be lost between tool calls; use `subprocess.Popen(..., start_new_session=True)`,
+  track it by pid (`kill -0`), and don't `pgrep -f "python …"` (the interpreter shows up as
+  `Python`, case matters).
 - **The model adds redundant checks** («Уточню: … Верно?» about the date before
-  `prepare_booking`, or re-asking the time): measured in 1.10, see above; not fixed.
+  `prepare_booking`, or re-asking the time): measured in 1.10 as the warning
+  `own_recap_before_prepare` (19/50 runs); not fixed.
 - **Empty model reply:** now handled (1.9): the engine retries once, then raises `LLMError`,
   and `CallSession` says the fallback phrase. (Seen once on qwen3.5:4b.)
 
@@ -387,7 +418,8 @@ real VPS).
 .venv/bin/python scripts/send_test_notification.py  # ONE real test message to the owner's Telegram
 .venv/bin/python scripts/latency_study.py            # TTFT p50/p90/p99 per OpenRouter routing (~4 min, cents)
 .venv/bin/python -m evals --dry-run                  # scenario evals: plan + cost estimate, no LLM calls
-.venv/bin/python -m evals [--scenarios a,b] [--runs 5]  # REAL LLM calls (~$0.06 per 50 runs), on demand only
+.venv/bin/python -m evals [--scenarios a,b] [--runs 5]  # REAL LLM calls (~$0.16 per 50 runs), on demand only
+.venv/bin/python -m evals --calibrate-caller         # rank candidate caller models (cents)
 .venv/bin/python -m agent.cli --show-tools           # talk to the agent in the terminal (see 1.9)
 .venv/bin/python -m agent.cli --script scripts/scenarios/booking_saturday_afternoon.txt \
     --caller +79991234567 --show-tools --db /tmp/scratch.db   # scripted call; add --notify for real Telegram

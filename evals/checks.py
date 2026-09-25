@@ -14,6 +14,7 @@ from datetime import date, time
 
 from agent.ru_words import longest_number_run, spoken_amounts
 from agent.text_guard import foreign_script_chars
+from evals.caller import is_farewell
 from evals.model import Check, CheckContext, CheckResult, Item, RunResult
 
 PHONE_RUN_THRESHOLD = 6  # this many consecutive digits/number-words in one sentence = a phone
@@ -198,9 +199,17 @@ def exactly_one_message() -> Check:
 
 
 def agent_ended_call() -> Check:
+    """When the caller said goodbye, the agent must have hung up. If the caller never said
+    goodbye (they just thanked, or the run ended some other way) there is nothing to require."""
+
     @named("agent_ended_call")
     def check(run: RunResult, ctx: CheckContext) -> CheckResult:
-        return result("agent_ended_call", run.ended_call(), "the agent never called end_call")
+        last = run.caller_lines[-1] if run.caller_lines else ""
+        if not is_farewell(last):
+            return result("agent_ended_call", True)
+        return result(
+            "agent_ended_call", run.ended_call(), "the caller said goodbye, the agent never hung up"
+        )
 
     return check
 
@@ -300,6 +309,17 @@ def car_match(pattern: str) -> Check:
     return booking_field(
         "car_ok", lambda b: re.search(pattern, b.car, re.I), f"car should match /{pattern}/"
     )
+
+
+def no_booking_on(day: date, name: str = "abandoned_slot_not_saved") -> Check:
+    """Nothing was saved for a slot the caller gave up (e.g. after changing their mind)."""
+
+    @named(name)
+    def check(run: RunResult, ctx: CheckContext) -> CheckResult:
+        hit = [b for b in run.bookings if b.preferred_date == day]
+        return result(name, not hit, f"a booking for the abandoned day {day} was saved")
+
+    return check
 
 
 def prepared_at_least(times: int) -> Check:
@@ -470,6 +490,40 @@ def never_offers_this_number() -> Check:
         "never_offers_this_number",
         r"с которого вы звоните|на этот номер|ваш номер (определ|высвечива)",
     )
+
+
+# --- Warning metrics (reported, never pass/fail) --------------------------------------------------
+
+_OWN_RECAP = re.compile(r"\b(?:верно|правильно)\s*\?\s*$|^\s*уточню\b", re.I)
+
+
+@named("own_recap_before_prepare")
+def own_recap_before_prepare(run: RunResult, ctx: CheckContext) -> CheckResult:
+    """The model recapped the details itself («Уточню: … Верно?») before calling prepare_booking,
+    although the system reads the request back. Harmless but redundant, so only a warning:
+    `passed` means "no warning"."""
+    name = "own_recap_before_prepare"
+    for index, item in enumerate(run.items):
+        if item.kind == "tool" and item.tool == "prepare_booking" and not item.is_error:
+            for earlier in run.items[:index]:
+                if earlier.kind == "say" and _OWN_RECAP.search(earlier.text):
+                    return CheckResult(name, False, f"said {earlier.text!r} before prepare_booking")
+            return CheckResult(name, True)
+    return CheckResult(name, True)  # no booking was prepared: not applicable
+
+
+WARNINGS: tuple[Check, ...] = (own_recap_before_prepare,)
+WARNING_NAMES = tuple(w.check_name for w in WARNINGS)
+
+
+def run_warnings(run: RunResult, ctx: CheckContext) -> list[CheckResult]:
+    results = []
+    for warning in WARNINGS:
+        try:
+            results.append(warning(run, ctx))
+        except Exception as exc:
+            results.append(CheckResult(warning.check_name, False, f"crashed: {exc}"))
+    return results
 
 
 # --- Running checks -------------------------------------------------------------------------------

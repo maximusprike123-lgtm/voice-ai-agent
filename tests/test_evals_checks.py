@@ -551,3 +551,127 @@ def test_a_call_with_no_outcome_fails_the_scenarios_that_expect_one(scenario):
     expects_something = scenario.id not in {"rude_offtopic"}
     failed = [r.name for r in results if not r.passed]
     assert bool(failed) is expects_something
+
+
+# --- Approved harness fixes -----------------------------------------------------------------------
+
+
+def run_with_caller_lines(lines, items=(), **kwargs) -> RunResult:
+    run = make_run(items, **kwargs)
+    run.caller_lines = list(lines)
+    return run
+
+
+def test_agent_ended_call_is_required_only_after_a_farewell():
+    hung_up = [say(1, "Всего доброго!"), tool(1, "end_call"), end(1)]
+    stayed = [say(1, "Могу ещё чем-то помочь?")]
+
+    goodbye = ["Нет, спасибо. До свидания."]
+    thanks_only = ["Спасибо большое!"]
+    check = c.agent_ended_call()
+
+    assert ok(check, run_with_caller_lines(goodbye, hung_up))
+    assert not ok(check, run_with_caller_lines(goodbye, stayed))
+    assert ok(check, run_with_caller_lines(thanks_only, stayed))  # nothing to require
+    assert ok(check, run_with_caller_lines([], []))
+    assert "never hung up" in check(run_with_caller_lines(goodbye, stayed), CTX).detail
+
+
+def test_the_abandoned_slot_check():
+    saturday, monday = date(2026, 9, 26), date(2026, 9, 28)
+    check = c.no_booking_on(saturday)
+    assert ok(check, make_run(bookings=[booking(preferred_date=monday)]))
+    assert ok(check, make_run())
+    assert not ok(check, make_run(bookings=[booking(preferred_date=saturday)]))
+    assert not ok(
+        check, make_run(bookings=[booking(preferred_date=monday), booking(preferred_date=saturday)])
+    )
+
+
+def test_changes_mind_asserts_outcomes_not_the_number_of_drafts():
+    names = [chk.check_name for chk in BY_ID["changes_mind"].checks]
+    assert "prepared_at_least_2" not in names
+    assert {"exactly_one_booking", "abandoned_slot_not_saved", "date_ok", "morning"} <= set(names)
+
+
+def test_changes_mind_passes_with_one_draft_when_the_final_booking_is_right():
+    """The agent may have done its own recap, so only ONE prepare_booking happened: still fine."""
+    scenario = BY_ID["changes_mind"]
+    run = ideal("changes_mind")
+    run.items = [
+        i
+        for i in run.items
+        if not (i.kind == "tool" and i.tool == "prepare_booking" and i.turn == 2)
+    ]
+    assert [r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed] == []
+
+
+def test_service_not_listed_now_wants_a_booking_and_no_message():
+    scenario = BY_ID["service_not_listed"]
+    assert "ЗАПИСАТЬСЯ" in scenario.persona
+    names = [chk.check_name for chk in scenario.checks]
+    assert "exactly_one_booking" in names and "no_messages" in names
+    with_message = ideal("service_not_listed")
+    with_message.bookings = []
+    with_message.messages = [message("Спросил про фары")]
+    failed = {r.name for r in c.grade(with_message, scenario.checks, CTX) if not r.passed}
+    assert {"exactly_one_booking", "no_messages", "service_ok"} <= failed
+
+
+def test_the_rude_caller_ends_with_a_farewell_so_its_hang_up_counts():
+    from evals.caller import is_farewell
+
+    assert is_farewell(BY_ID["rude_offtopic"].behavior)
+
+
+# --- Warning metrics (not pass/fail) --------------------------------------------------------------
+
+
+def test_the_agents_own_recap_before_prepare_is_a_warning_not_a_check():
+    recap = [
+        say(1, "Уточню: полировка кузова на субботу, после обеда."),
+        say(1, "Всё верно?"),
+        tool(2, "prepare_booking"),
+        *READ_BACK,
+    ]
+    [warning] = c.run_warnings(make_run(recap), CTX)
+    assert warning.name == "own_recap_before_prepare" and not warning.passed  # fired
+    assert "Уточню" in warning.detail
+    assert "own_recap_before_prepare" not in [chk.check_name for chk in c.INVARIANTS]
+    assert all(r.name != "own_recap_before_prepare" for r in c.grade(make_run(recap), (), CTX))
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [say(1, "Как вас зовут?"), tool(2, "prepare_booking"), *READ_BACK],  # clean flow
+        [tool(2, "prepare_booking"), say(2, "Всё верно?")],  # the code's read-back comes AFTER
+        [say(1, "Всё верно?")],  # no booking prepared: not applicable
+        [
+            say(1, "Уточню, пожалуйста, марку."),
+            tool(2, "prepare_booking", error=True),
+        ],  # failed draft
+    ],
+)
+def test_no_warning_when_there_was_no_recap_before_a_draft(items):
+    [warning] = c.run_warnings(make_run(items), CTX)
+    assert warning.passed
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Всё верно?",
+        "Верно?",
+        "Правильно?",
+        "Уточню: вас интересует полировка.",
+        "уточню, вы хотите в субботу.",
+    ],
+)
+def test_recap_phrases_that_trigger_the_warning(sentence):
+    run = make_run([say(1, sentence), tool(2, "prepare_booking")])
+    assert not c.run_warnings(run, CTX)[0].passed
+
+
+def test_warning_names_are_exported():
+    assert c.WARNING_NAMES == ("own_recap_before_prepare",)
