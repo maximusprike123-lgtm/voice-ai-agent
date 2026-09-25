@@ -146,6 +146,35 @@ def end_call_not_with_accepted_save(run: RunResult, ctx: CheckContext) -> CheckR
     return result("end_call_not_with_accepted_save", True)
 
 
+# Completed-action claims: "the request has been accepted / passed on". Future or conditional
+# explanations («администратор перезвонит после записи») are deliberately not matched here.
+_ACCEPTANCE_CLAIM = re.compile(
+    r"заявк\w*\s+(?:уже\s+)?(?:принят|передан|отправлен|оформлен)\w*"
+    r"|принят\w*\s+и\s+передан\w*|сообщение\s+передан\w*|ваша\s+просьба\s+принята"
+    r"|запись\s+оформлена",
+    re.I,
+)
+
+
+@named("no_acceptance_claim_without_save")
+def no_acceptance_claim_without_save(run: RunResult, ctx: CheckContext) -> CheckResult:
+    """Never say the request was accepted/passed on before something was actually saved.
+    (The sentences the code speaks after a save come after the committed tool result.)"""
+    saved = False
+    for item in run.items:
+        if item.kind == "tool" and item.committed:
+            saved = True
+        elif item.kind == "say" and not saved:
+            text = item.text.strip()
+            if not text.endswith("?") and _ACCEPTANCE_CLAIM.search(text):
+                return result(
+                    "no_acceptance_claim_without_save",
+                    False,
+                    f"claimed acceptance with nothing saved: {item.text!r}",
+                )
+    return result("no_acceptance_claim_without_save", True)
+
+
 INVARIANTS: tuple[Check, ...] = (
     no_foreign_script,
     no_written_down_before_confirm,
@@ -155,6 +184,7 @@ INVARIANTS: tuple[Check, ...] = (
     confirm_only_after_readback,
     no_premature_confirm_attempt,
     end_call_not_with_accepted_save,
+    no_acceptance_claim_without_save,
 )
 INVARIANT_NAMES = tuple(c.check_name for c in INVARIANTS)
 
@@ -199,14 +229,18 @@ def exactly_one_message() -> Check:
 
 
 def agent_ended_call() -> Check:
-    """When the caller said goodbye, the agent must have hung up. If the caller never said
-    goodbye (they just thanked, or the run ended some other way) there is nothing to require."""
+    """When the caller said goodbye, the agent must have hung up. Nothing is required if the
+    caller never said goodbye (they just thanked) or said it in the very turn of an accepted
+    save (the code refuses end_call in that turn)."""
 
     @named("agent_ended_call")
     def check(run: RunResult, ctx: CheckContext) -> CheckResult:
         last = run.caller_lines[-1] if run.caller_lines else ""
         if not is_farewell(last):
             return result("agent_ended_call", True)
+        last_turn = len(run.caller_lines)
+        if any(i.kind == "tool" and i.committed and i.turn == last_turn for i in run.items):
+            return result("agent_ended_call", True)  # the code forbids hanging up in a save turn
         return result(
             "agent_ended_call", run.ended_call(), "the caller said goodbye, the agent never hung up"
         )
@@ -478,11 +512,30 @@ def offers_another_day() -> Check:
     )
 
 
+_ASKS_FOR_NUMBER = re.compile(
+    r"продикт|(?:назов|подскаж|укаж|сообщ|оставьте)\w*[^.?!]*(?:номер|телефон)"
+    r"|какой[^.?!]*(?:номер|телефон)|на какой номер|номер (?:телефона )?для связи",
+    re.I,
+)
+
+
+def _gives_number(line: str) -> bool:
+    return len(re.sub(r"\D", "", line)) >= 10
+
+
 def asks_to_dictate_number() -> Check:
-    return speech_matches(
-        "asks_for_a_number",
-        r"продикт|назов\w+ (ваш )?(номер|телефон)|номер (телефона )?для связи|какой (у вас )?номер",
-    )
+    """With a hidden caller ID the agent must get a number from the caller. Satisfied if it
+    asked for one, or if the caller volunteered a number (then there was nothing to ask)."""
+
+    @named("asks_for_a_number")
+    def check(run: RunResult, ctx: CheckContext) -> CheckResult:
+        if any(_gives_number(line) for line in run.caller_lines):
+            asked = True  # volunteered; whether or not it was asked for first
+        else:
+            asked = bool(_sentences_matching(run, _ASKS_FOR_NUMBER))
+        return result("asks_for_a_number", asked, "no number was asked for or given")
+
+    return check
 
 
 def never_offers_this_number() -> Check:

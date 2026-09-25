@@ -238,7 +238,6 @@ SCENARIOS: tuple[Scenario, ...] = (
         caller_phone=CALLER_ID,
         checks=(
             c.no_bookings(),
-            c.no_messages(),
             c.speech_matches("gives_address", r"примерн"),
             c.speech_matches("gives_directions", r"двор|ворот|вывеск|парковк"),
             c.agent_ended_call(),

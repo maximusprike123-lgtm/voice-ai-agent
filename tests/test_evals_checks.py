@@ -238,7 +238,7 @@ def test_a_crashing_check_counts_as_a_failure_with_its_name():
 
 def test_every_invariant_is_named_and_unique():
     names = [inv.check_name for inv in c.INVARIANTS]
-    assert len(names) == len(set(names)) == len(c.INVARIANT_NAMES) == 8
+    assert len(names) == len(set(names)) == len(c.INVARIANT_NAMES) == 9
 
 
 # --- Scenario check factories ---------------------------------------------------------------------
@@ -675,3 +675,102 @@ def test_recap_phrases_that_trigger_the_warning(sentence):
 
 def test_warning_names_are_exported():
     assert c.WARNING_NAMES == ("own_recap_before_prepare",)
+
+
+# --- Second round of harness fixes ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("items", "passes"),
+    [
+        # nothing saved, but the agent claims the request went through
+        ([say(3, "Спасибо! Заявка принята, администратор перезвонит вам.")], False),
+        ([say(3, "Ваша заявка передана администратору.")], False),
+        ([say(3, "Сообщение передано администратору, он свяжется с вами.")], False),
+        ([say(3, "Заявка уже оформлена.")], False),
+        ([say(3, "Ваша просьба принята.")], False),
+        # the same words after a save (the code's own sentences) are fine
+        (
+            [
+                tool(3, "confirm_booking", committed=True),
+                say(3, "Заявка принята и передана администратору."),
+            ],
+            True,
+        ),
+        (
+            [tool(3, "take_message", committed=True), say(3, "Сообщение передано администратору.")],
+            True,
+        ),
+        # a failed or refused confirm is not a save
+        ([tool(3, "confirm_booking", error=True), say(3, "Заявка принята.")], False),
+        # explanations and offers are not claims
+        ([say(1, "После записи администратор перезвонит вам для подтверждения.")], True),
+        ([say(1, "Хотите, чтобы заявка была передана администратору?")], True),
+        ([say(1, "Заявка принята?")], True),
+        ([say(1, "Как вас зовут?")], True),
+    ],
+)
+def test_no_acceptance_claim_without_save(items, passes):
+    assert ok(c.no_acceptance_claim_without_save, make_run(items)) is passes
+
+
+def test_the_agent_that_claimed_acceptance_without_calling_confirm_is_caught_end_to_end():
+    """The failure seen in the second baseline sweep (service_not_listed #0)."""
+    items = [
+        tool(2, "prepare_booking"),
+        *READ_BACK,
+        say(3, "Спасибо!"),
+        say(3, "Заявка принята, администратор перезвонит вам для уточнения деталей."),
+    ]
+    failed = c.grade(make_run(items), (), CTX)
+    assert [r.name for r in failed if not r.passed] == ["no_acceptance_claim_without_save"]
+
+
+@pytest.mark.parametrize(
+    ("caller", "agent", "passes"),
+    [
+        (["Хочу записаться."], ["Продиктуйте, пожалуйста, номер телефона."], True),
+        (["Хочу записаться."], ["Подскажите, пожалуйста, ваш телефон для связи."], True),
+        (["Хочу записаться."], ["На какой номер вам перезвонить?"], True),
+        (["Игорь. Мой номер 8 916 123 45 67."], ["Спасибо, Игорь."], True),  # volunteered
+        (
+            ["Хочу записаться."],
+            ["Как вас зовут?", "Марку автомобиля?"],
+            False,
+        ),  # never asked, never given
+    ],
+)
+def test_asks_for_a_number_is_satisfied_by_asking_or_by_the_caller_volunteering_one(
+    caller, agent, passes
+):
+    run = run_with_caller_lines(caller, [say(1, t) for t in agent])
+    assert ok(c.asks_to_dictate_number(), run) is passes
+
+
+def test_a_short_number_fragment_is_not_a_volunteered_number():
+    run = run_with_caller_lines(["Мне на 14:00, в 2026 году."], [say(1, "Как вас зовут?")])
+    assert not ok(c.asks_to_dictate_number(), run)
+
+
+def test_a_farewell_in_the_turn_of_an_accepted_save_does_not_require_a_hang_up():
+    items = [
+        tool(2, "confirm_booking", committed=True),
+        say(2, "Заявка принята и передана администратору."),
+        say(2, "Могу ещё чем-то помочь?"),
+    ]
+    check = c.agent_ended_call()
+    saved_now = run_with_caller_lines(
+        ["Да, спасибо. До свидания.", "Да, всё верно. До свидания."], items
+    )
+    assert ok(check, saved_now)  # the code forbids end_call in that turn
+
+    later_turn = run_with_caller_lines(["Да.", "Да.", "Нет, спасибо. До свидания."], items)
+    assert not ok(check, later_turn)  # the save was in an earlier turn: the agent had to hang up
+
+
+def test_address_only_no_longer_penalises_a_message_for_an_unanswerable_follow_up():
+    names = [chk.check_name for chk in BY_ID["address_only"].checks]
+    assert "no_messages" not in names and "no_bookings" in names
+    run = ideal("address_only")
+    run.messages = [message("Как проехать от метро")]
+    assert [r.name for r in c.grade(run, BY_ID["address_only"].checks, CTX) if not r.passed] == []

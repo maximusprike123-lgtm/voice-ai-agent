@@ -33,6 +33,7 @@ class RunResult:
     detail: str = ""
     seconds: float = 0.0
     markers_ignored: int = 0  # caller hang-up markers that came without a farewell (ignored)
+    farewells_deferred: int = 0  # caller goodbyes not honored because the agent asked a question
 
     @property
     def turns(self) -> int:

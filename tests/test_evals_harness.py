@@ -298,10 +298,16 @@ async def test_records_saved_before_an_unexpected_exception_are_kept(tmp_path):
 async def test_each_run_gets_its_own_database_and_the_clock_is_fixed(tmp_path):
     def booking_agent():
         return ScriptedLLM(
-            tool_round("prepare_booking", BOOKING_ARGS), tool_round("confirm_booking")
+            tool_round("prepare_booking", BOOKING_ARGS),
+            tool_round("confirm_booking"),
+            [TextDelta("Всего доброго!"), *tool_round("end_call")],
         )
 
-    caller_lines = [text("Запишите меня."), text("Да, до свидания. [КОНЕЦ]")]
+    caller_lines = [
+        text("Запишите меня."),
+        text("Да, всё верно."),
+        text("Нет, спасибо. До свидания. [КОНЕЦ]"),
+    ]
     first = await run(
         BY_ID["happy_path_booking"], booking_agent(), ScriptedLLM(*caller_lines), tmp_path, 0
     )
@@ -986,3 +992,87 @@ def test_the_default_sweep_estimate_matches_the_measured_cost_of_the_baseline():
     prices = {"agent": (0.15, 0.6), "caller": (0.1, 0.4)}
     estimate = estimate_cost([s.id for s in SCENARIOS for _ in range(5)], prices)
     assert 0.156 * 0.85 < estimate < 0.156 * 1.15
+
+
+# --- Deferred farewells ---------------------------------------------------------------------------
+
+
+async def test_a_farewell_is_deferred_while_the_agents_reply_asks_a_question(tmp_path):
+    """The caller says «да, спасибо, до свидания» to the read-back; the agent's reply (the
+    acceptance) asks «Могу ещё чем-то помочь?», so the caller gets to answer it."""
+    agent = ScriptedLLM(
+        tool_round("prepare_booking", BOOKING_ARGS),
+        tool_round("confirm_booking"),
+        [TextDelta("Всего доброго!"), *tool_round("end_call")],
+    )
+    caller = ScriptedLLM(
+        text("Запишите меня."),
+        text("Да, всё верно, спасибо. До свидания. [КОНЕЦ]"),  # farewell answering the read-back
+        text("Нет, спасибо. До свидания. [КОНЕЦ]"),  # the answer to «Могу ещё чем-то помочь?»
+    )
+
+    result = await run(BY_ID["happy_path_booking"], agent, caller, tmp_path)
+
+    assert result.outcome == "completed" and result.turns == 3
+    assert result.farewells_deferred == 1 and result.ended_call()
+    assert len(result.bookings) == 1
+
+
+async def test_a_farewell_is_honored_when_the_agent_does_not_ask_anything(tmp_path):
+    agent = ScriptedLLM(text("Мы на улице Примерной."), text("Всего доброго."))
+    caller = ScriptedLLM(text("Где вы?"), text("Спасибо, до свидания. [КОНЕЦ]"))
+
+    result = await run(BY_ID["address_only"], agent, caller, tmp_path)
+
+    assert result.turns == 2 and result.farewells_deferred == 0
+
+
+async def test_a_caller_that_keeps_saying_goodbye_to_a_questioning_agent_ends_at_the_turn_cap(
+    tmp_path,
+):
+    scenario = replace(BY_ID["address_only"], max_turns=3)
+    agent = ScriptedLLM(*[text("Что-то ещё подсказать?")] * 3)
+    caller = ScriptedLLM(*[text("Нет, до свидания. [КОНЕЦ]")] * 3)
+
+    result = await run(scenario, agent, caller, tmp_path)
+
+    assert result.outcome == "inconclusive" and result.farewells_deferred == 3
+
+
+async def test_the_agent_hanging_up_still_ends_the_run_even_if_it_also_asked(tmp_path):
+    agent = ScriptedLLM([TextDelta("Всего доброго! Звоните ещё?"), *tool_round("end_call")])
+    caller = ScriptedLLM(text("Спасибо, до свидания. [КОНЕЦ]"))
+
+    result = await run(BY_ID["address_only"], agent, caller, tmp_path)
+
+    assert result.turns == 1 and result.ended_call()
+
+
+def test_the_report_shows_how_many_farewells_were_deferred():
+    runs = [graded("alpha", "pass"), graded("alpha", "pass")]
+    runs[0].run.farewells_deferred = 2
+    assert "goodbyes deferred because the agent's reply asked a question: 2" in format_report(
+        runs, ["alpha"]
+    )
+    assert to_json(runs)[0]["farewells_deferred"] == 2
+
+
+def test_the_json_export_keeps_turn_zero_and_omits_empty_fields():
+    run = RunResult(
+        "s",
+        0,
+        ["x"],
+        [
+            Item(0, "say", text="Здравствуйте!"),
+            Item(1, "tool", text="ok", tool="end_call", args={}, committed=False),
+            Item(1, "end"),
+        ],
+        [],
+        [],
+        "completed",
+    )
+    items = to_json([Graded(run, [])])[0]["items"]
+
+    assert items[0] == {"turn": 0, "kind": "say", "text": "Здравствуйте!"}  # turn 0 kept
+    assert items[1] == {"turn": 1, "kind": "tool", "text": "ok", "tool": "end_call"}
+    assert items[2] == {"turn": 1, "kind": "end"}

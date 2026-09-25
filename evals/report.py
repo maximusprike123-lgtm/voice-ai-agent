@@ -175,9 +175,11 @@ def format_report(graded: list[Graded], order: list[str]) -> str:
             if example:
                 lines.append(f"    e.g. {example[:160]}")
     ignored = sum(s.markers_ignored for s in summaries.values())
+    deferred = sum(g.run.farewells_deferred for g in graded)
     lines += [
         "",
         f"caller hang-up markers ignored because the line was not a farewell: {ignored}",
+        f"caller goodbyes deferred because the agent's reply asked a question: {deferred}",
     ]
     return "\n".join(lines)
 
@@ -215,6 +217,16 @@ def format_transcript(g: Graded) -> str:
     return "\n".join(lines)
 
 
+def _item_json(item) -> dict:
+    """turn and kind always; the other fields only when set. (`turn=0` must survive: 0 == False.)"""
+    out = {"turn": item.turn, "kind": item.kind}
+    for name in ("text", "tool", "args", "committed", "is_error"):
+        value = getattr(item, name)
+        if value not in ("", {}, False, None):
+            out[name] = value
+    return out
+
+
 def to_json(graded: list[Graded]) -> list[dict]:
     out = []
     for g in graded:
@@ -228,13 +240,11 @@ def to_json(graded: list[Graded]) -> list[dict]:
                 "detail": run.detail,
                 "seconds": round(run.seconds, 1),
                 "caller_lines": run.caller_lines,
-                "items": [
-                    {k: v for k, v in item.__dict__.items() if v not in ("", {}, False)}
-                    for item in run.items
-                ],
+                "items": [_item_json(item) for item in run.items],
                 "bookings": [{k: str(v) for k, v in vars(b).items()} for b in run.bookings],
                 "messages": [{k: str(v) for k, v in vars(m).items()} for m in run.messages],
                 "markers_ignored": run.markers_ignored,
+                "farewells_deferred": run.farewells_deferred,
                 "checks": [
                     {"name": r.name, "passed": r.passed, "detail": r.detail} for r in g.results
                 ],

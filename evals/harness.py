@@ -35,6 +35,7 @@ async def run_once(
     outcome, detail = "completed", ""
     bookings, messages = [], []
     markers_ignored = 0
+    farewells_deferred = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         db_path = (db_dir or Path(tmp)) / f"{scenario.id}_{run_index}.db"
@@ -72,7 +73,15 @@ async def run_once(
 
                         if outcome == "infra_error":
                             break  # the run is void; do not spend more tokens on it
-                        if session.ended or done:
+                        if session.ended:
+                            break
+                        if done:
+                            if said and said[-1].strip().endswith("?"):
+                                # The caller said goodbye, but the agent replied with a question
+                                # (e.g. the read-back «Всё верно?»): a real caller would answer
+                                # it before hanging up, so let the caller continue.
+                                farewells_deferred += 1
+                                continue
                             break
                     else:
                         outcome, detail = "inconclusive", f"no end after {scenario.max_turns} turns"
@@ -100,6 +109,7 @@ async def run_once(
         detail=detail,
         seconds=time.monotonic() - started,
         markers_ignored=markers_ignored,
+        farewells_deferred=farewells_deferred,
     )
 
 

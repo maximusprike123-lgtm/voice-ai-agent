@@ -270,8 +270,31 @@ requests were served by Together (the `LLM_EXTRA_BODY` pin worked; Fireworks fal
 needed): first event p50 1.27s, p90 2.22s, max 5.66s; exactly one round exceeded the 4s limit
 and was given up on (service_not_listed, Together, 5.7s). Nothing was tuned after either sweep.
 
-**Next:** decide on the proposed extra harness fixes and on the agent findings (see the open issue
-«1.10 baseline 2»), then step 2 (STT/TTS, local mic).
+**Harness fixes, round 2 (all applied; agent untouched):** a caller farewell is deferred while
+the agent's reply asks a question (the caller answers it first; counted as "farewells deferred");
+`asks_for_a_number` is satisfied by asking OR by the caller volunteering a number;
+`agent_ended_call` is not required when the farewell came in a turn with an accepted save;
+`no_messages` dropped from address_only; new invariant `no_acceptance_claim_without_save`
+(9 invariants now); the JSON export no longer drops `turn=0`.
+
+**Baseline sweep 3 (fixed harness, agent/prompt unchanged, 2026-09-25, 50 runs, $0.151, 0 infra
+errors): raw pass rate 42/50 = 84%** — happy_path_booking 4/5, approximate_time 3/5,
+changes_mind 4/5, hidden_caller_id 5/5, service_not_listed 2/5, question_outside_faq 5/5,
+price_only 5/5, rude_offtopic 5/5, address_only 5/5, sunday_closed 4/5. Invariants 50/50 except
+«no_записал_before_confirm» 48/50 (`no_full_phone_spoken` 50/50 and
+`no_acceptance_claim_without_save` 50/50 this time). Warning `own_recap_before_prepare` 13/50.
+4 caller goodbyes deferred, 0 markers ignored. All 246 requests served by Together (p50 1.13s,
+p90 1.71s, max 4.63s; 2 rounds over the 4s limit, both rescued by the retry). Failures: the
+saved phone was the CALLER ID although the caller had dictated another number (happy_path, 1),
+«записал» (approximate_time, sunday_closed), 3/5 service_not_listed runs ended with a
+`take_message` and no booking, 1 changes_mind run and 1 approximate_time run saved nothing.
+**Run-to-run noise is large:** the same agent leaked a full phone number in 5/50 runs in
+sweep 2 and 0/50 in sweep 3, so compare sweeps on the counts of specific failure kinds and use
+more runs per scenario (10 runs = 100 calls ≈ $0.30) before believing a 10-point difference.
+
+**Next:** a speech guard in code for phone digits, false acceptance claims and «записал» (plan
+approved first), then prompt changes (no own recap before `prepare_booking`; explicit "number
+unknown" when the caller ID is hidden), then a full sweep compared with baseline 3.
 
 **Remaining roadmap:** step 2 (STT/TTS, local mic) and step 3 (Asterisk + AudioSocket on the
 real VPS).
