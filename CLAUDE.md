@@ -166,7 +166,8 @@ so `NotifyError`s are raised outside `except` blocks (never chained to httpx err
 own INFO log line ("HTTP Request: POST …/bot<TOKEN>/sendMessage") is redacted by a logging
 filter on the `httpx` logger — found by a test, it *did* leak the token at the default INFO
 level. `scripts/send_test_notification.py` sends one marked test message through the whole
-real path (temporary SQLite + `NotifyingSink` + Telegram). Nothing wires `NotifyingSink` into
+real path (temporary SQLite + `NotifyingSink` + Telegram); verified live: delivered, marked
+notified, token absent from all output. Nothing wires `NotifyingSink` into
 an app yet: the CLI (1.9) / call handler (step 3) will build store → notifier → sink and call
 `start()`/`aclose()`.
 
@@ -222,12 +223,17 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   bot blocked, chat not found), bookings pile up unnotified and the owner doesn't know
   (the only trace is an ERROR log line). Before real customers: add a second alert channel
   (e.g. alert me if unnotified records are older than 30 minutes).
-- **Telegram live test not yet delivered (as of 1.8).** `send_test_notification.py` got
-  `400 chat not found`: the token is valid (bot `@voise_demo_agent_bot`) but no chat has ever
-  contacted the bot (0 updates), and a bot cannot message a user who hasn't started it. The
-  owner must open the bot in Telegram and press Start (or send any message), then re-run the
-  script; if it still fails, `TELEGRAM_CHAT_ID` is wrong. This is also the exact scenario of
-  the item above, and it behaved as designed (permanent error, no retry, row stays unnotified).
+- **Telegram is reachable from Russia only unreliably (measured 2026-09-25, dev Mac in
+  Moscow).** The live test message *was* delivered (after `/start` in `@voise_demo_agent_bot`;
+  a bot can't message a user who hasn't started it, which first showed up as
+  `400 chat not found`), but only on the 4th attempt (17s): TCP connect to `api.telegram.org`
+  is instant while the TLS handshake stalls ~10s in about 2 of 8 tries (0.4-0.7s otherwise) —
+  the usual signature of DPI throttling. The retry/backoff logic absorbed it, and it is
+  invisible to callers because notifications are background work. Still: **re-measure from the
+  production VPS before real customers**, expect slow/late owner notifications, and be ready
+  with a workaround (an HTTPS proxy for httpx, or a relay; `TelegramNotifier` already takes
+  `api_url`). This is another reason for the second alert channel above. The long-lived
+  client reuses connections, so steady-state cost is lower than in the one-shot test script.
 - **Empty model reply:** seen once (qwen3.5:4b, turn 2 of a conversation): the LLM returned
   no text and no tool call, so `DialogueEngine.respond()` yields no events and the caller
   would hear silence. Decide handling (retry / fallback phrase) in 1.9 or 1.10.
