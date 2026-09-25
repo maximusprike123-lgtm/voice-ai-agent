@@ -56,3 +56,27 @@ def test_invalid_timezone_fails(env):
     env.setenv("TIMEZONE", "Mars/Olympus")
     with pytest.raises(ValidationError, match="time zone"):
         Settings(_env_file=None)
+
+
+def test_llm_stall_timeouts_default_to_4s_first_event_and_8s_between_events(env):
+    settings = Settings(_env_file=None)
+    assert settings.llm_first_event_timeout_seconds == 4.0
+    assert settings.llm_event_timeout_seconds == 8.0
+
+
+def test_llm_stall_timeouts_are_configurable(env):
+    env.setenv("LLM_FIRST_EVENT_TIMEOUT_SECONDS", "2.5")
+    env.setenv("LLM_EVENT_TIMEOUT_SECONDS", "6")
+    settings = Settings(_env_file=None)
+    assert (settings.llm_first_event_timeout_seconds, settings.llm_event_timeout_seconds) == (
+        2.5,
+        6,
+    )
+
+
+@pytest.mark.parametrize("name", ["LLM_FIRST_EVENT_TIMEOUT_SECONDS", "LLM_EVENT_TIMEOUT_SECONDS"])
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_llm_stall_timeouts_must_be_positive(env, name, bad):
+    env.setenv(name, bad)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

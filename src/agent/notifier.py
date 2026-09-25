@@ -304,14 +304,18 @@ class NotifyingSink:
 
     # --- Lifecycle -------------------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Resend everything unnotified, then start the worker and the periodic sweep."""
+    async def start(self) -> int:
+        """Resend everything unnotified, then start the worker and the periodic sweep.
+
+        Returns how many older records were queued for (re)sending.
+        """
         if self._worker is not None:
-            return
+            return 0
         self._closing = False
-        await self._enqueue_pending()
+        queued = await self._enqueue_pending()
         self._worker = asyncio.create_task(self._work(), name="notifier-worker")
         self._sweeper = asyncio.create_task(self._sweep(), name="notifier-sweep")
+        return queued
 
     async def aclose(self) -> None:
         """Give queued messages `shutdown_grace` seconds, then stop. Unsent rows stay in the
@@ -340,9 +344,11 @@ class NotifyingSink:
         self._queued.add(key)
         self._queue.put_nowait(record)
 
-    async def _enqueue_pending(self) -> None:
-        for record in await self._store.list_unnotified():
+    async def _enqueue_pending(self) -> int:
+        pending = await self._store.list_unnotified()
+        for record in pending:
             self._submit(record)
+        return len(pending)
 
     async def _sweep(self) -> None:
         while True:

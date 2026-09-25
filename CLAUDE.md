@@ -177,9 +177,35 @@ Backend switch (after 1.6): main LLM is now OpenRouter DeepSeek (see Architectur
 `LLM_REASONING_EFFORT=high`); `measure_ttft.py` skips its Ollama-only cold-start run on
 remote backends.
 
-**Next: 1.9 — CLI** (text dialogue in the terminal: builds `SqliteSink` → `TelegramNotifier`
-→ `NotifyingSink`, `DialogueEngine`, `ToolRegistry`; handles empty LLM replies and short LLM
-timeouts).
+1.9 (CLI + failure handling): **Engine** (`dialogue.py`): every LLM round has two stall
+timeouts, first event 4s (`LLM_FIRST_EVENT_TIMEOUT_SECONDS`) and later events 8s
+(`LLM_EVENT_TIMEOUT_SECONDS`); a failed / stalled-before-first-token / empty round is retried
+ONCE on the identical messages (nothing duplicated), but not after the caller heard part of the
+answer and not after a stall in an already-flowing stream, so the worst case before the
+fallback is ~8s (2 x 4s), not 16s; still failing → `LLMError` (an empty reply is an error now,
+first-round failures roll the user message back); `add_assistant_message()` puts the greeting
+in the history. **`CallSession`** (`session.py`, reusable by step 3): speaks the greeting
+(business.yaml, no LLM), and on a failed turn says «Простите, я не расслышал. Повторите,
+пожалуйста.» (turn rolled back, caller repeats); the 2nd failed turn in a row → apology + hang-up
++ a `CallbackMessage` with the caller's last 3 lines and caller ID saved through the sink (so a
+technical failure never silently loses a caller); a success resets the counter; emits
+`TurnFailed(reason)` (not spoken). **`app.py`**: `open_runtime(settings, notify=, db_path=,
+clock=, llm=, notifier=)` builds store → (notifier → `NotifyingSink`) → LLM client and closes
+what it created; `Runtime.new_call(caller_phone)` = fresh prompt + tools + engine + session;
+`offset_clock()` for a fake "now" that keeps ticking. `NotifyingSink.start()` returns how many
+old records it queued. **CLI** (`cli.py`): `.venv/bin/python -m agent.cli [--caller PHONE]
+[--notify] [--db PATH] [--now 'YYYY-MM-DD HH:MM'] [--script FILE] [--show-tools]`; notifications
+are OFF unless `--notify`, database `DB_PATH` (data/agent.db) unless `--db`; `--script` reads the
+caller's lines from a file (`#` comments, blank lines skipped; example in
+`scripts/scenarios/`), `/quit` / Ctrl-D / Ctrl-C hang up, `/db` shows all saved records; at the
+end it prints what was saved during the call exactly as the owner would see it (+ Telegram
+state), and with `--notify` waits up to 30s for delivery. `--notify` also resends every older
+unnotified record in that database (it says so). Bad arguments → exit 2, bad config / unusable
+database → exit 1 without printing secret values.
+
+**Next: 1.10 — scenario tests against the real LLM:** an adaptive simulated caller, several
+runs per scenario, assertions on tool arguments / saved records / spoken read-backs, and a
+script check for non-Cyrillic/Latin characters in replies.
 
 **Remaining roadmap (from the original plan):** 1.10 tests incl. scripted scenario dialogues against the real LLM. Then step 2 (STT/TTS,
 local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
@@ -234,12 +260,34 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   with a workaround (an HTTPS proxy for httpx, or a relay; `TelegramNotifier` already takes
   `api_url`). This is another reason for the second alert channel above. The long-lived
   client reuses connections, so steady-state cost is lower than in the one-shot test script.
-- **Empty model reply:** seen once (qwen3.5:4b, turn 2 of a conversation): the LLM returned
-  no text and no tool call, so `DialogueEngine.respond()` yields no events and the caller
-  would hear silence. Decide handling (retry / fallback phrase) in 1.9 or 1.10.
-- **Foreign LLM host:** OpenRouter is outside Russia; the RU-only constraint applies to
-  telephony. Check the network path and data-handling terms before a real pilot (call audio
-  is not sent to the LLM, but transcripts with names and phone numbers are).
+- **Fallback phrases use masculine forms («не расслышал»); they must match the gender of the
+  TTS voice chosen in step 2** (`ASK_TO_REPEAT` in `session.py`; a test documents it). The
+  model's own wording is gendered too («принял», «записал»): the prompt should state the
+  agent's gender once the voice is chosen.
+- **A failure AFTER `confirm_booking` still asks the caller to "repeat" (seen live, 1.9).**
+  `confirm_booking` succeeded (booking saved and later delivered), then the follow-up LLM round
+  stalled twice, so the caller heard «Простите, я не расслышал. Повторите, пожалуйста.» about
+  something that had actually been accepted. The next turn recovered (the history was intact),
+  but a caller can't be told "not heard" after a booking was taken. Fix idea, in line with
+  "code enforces guarantees": when a turn fails after a tool with side effects succeeded, the
+  session says a code-built sentence («Заявка принята, администратор перезвонит вам для
+  подтверждения. Могу помочь ещё чем-нибудь?») instead of ASK_TO_REPEAT, or `confirm_booking`
+  itself carries a `say`. Not done yet.
+- **OpenRouter first-token stalls are frequent enough that the 4s timeout fires often** (live
+  CLI run, 2026-09-25: 3 first-token timeouts in ~10 LLM rounds; the engine's retry recovered
+  two of them, the third failed twice → the issue above). The earlier median (~1.2s) hid a fat
+  tail. Options: raise `LLM_FIRST_EVENT_TIMEOUT_SECONDS` (worst case before the fallback grows
+  as 2x), pin/sort OpenRouter providers by latency, or choose another backend. Measure again on
+  the production backend in the step-2 decision.
+- **Fixed-order `--script` callers are fragile** (a model that inserts one extra «Верно?» shifts
+  every later answer: the first live run answered the read-back with «Нет, спасибо» and
+  correctly hung up without booking). `scripts/scenarios/*.txt` are for eyeballing; the 1.10
+  scenario tests need an adaptive simulated caller (like `live_booking_dialogue.py`'s keyword
+  matching, or an LLM-played caller) and must assert on tool arguments / saved records.
+- **The model adds redundant checks** («Уточню: … Верно?» about the date before
+  `prepare_booking`, or re-asking the time): harmless but slows calls; left to 1.10.
+- **Empty model reply:** now handled (1.9): the engine retries once, then raises `LLMError`,
+  and `CallSession` says the fallback phrase. (Seen once on qwen3.5:4b.)
 
 ## Commands
 
@@ -253,4 +301,7 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 .venv/bin/python scripts/measure_ttft.py  # real prompt through DialogueEngine: cold/warm TTFT
 .venv/bin/python scripts/live_booking_dialogue.py  # scripted caller books via the real LLM + tools
 .venv/bin/python scripts/send_test_notification.py  # ONE real test message to the owner's Telegram
+.venv/bin/python -m agent.cli --show-tools           # talk to the agent in the terminal (see 1.9)
+.venv/bin/python -m agent.cli --script scripts/scenarios/booking_saturday_afternoon.txt \
+    --caller +79991234567 --show-tools --db /tmp/scratch.db   # scripted call; add --notify for real Telegram
 ```

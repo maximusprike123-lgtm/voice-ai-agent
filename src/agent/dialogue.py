@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 # Safety cap on LLM<->tools round trips within one user turn (guards against a looping model).
 MAX_LLM_ROUNDS = 5
 
+# How long to wait for the LLM before giving up on an attempt. The first event (time to first
+# token, incl. queueing and prompt processing) and later events have separate budgets: a
+# healthy backend answers in 1-2s, so a 4s silence at the start is a stall worth retrying,
+# while a stream that is already flowing gets more slack. With one retry, the worst case for
+# "no first token at all" is 2 x FIRST_EVENT_TIMEOUT before the caller hears the fallback.
+DEFAULT_FIRST_EVENT_TIMEOUT = 4.0
+DEFAULT_EVENT_TIMEOUT = 8.0
+
 # A "sentence" with fewer letters/digits than this ("Да.", "Ок.") is merged into the next one,
 # so TTS is never handed a lone one-word fragment.
 MIN_SENTENCE_CHARS = 4
@@ -150,9 +158,19 @@ def split_sentences(text: str) -> list[str]:
 
 
 class DialogueEngine:
-    def __init__(self, llm: LLMClient, tools: ToolExecutor, system_prompt: str) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        tools: ToolExecutor,
+        system_prompt: str,
+        *,
+        first_event_timeout: float = DEFAULT_FIRST_EVENT_TIMEOUT,
+        event_timeout: float = DEFAULT_EVENT_TIMEOUT,
+    ) -> None:
         self._llm = llm
         self._tools = tools
+        self._first_event_timeout = first_event_timeout
+        self._event_timeout = event_timeout
         self._messages: list[Message] = [Message(Role.SYSTEM, system_prompt)]
 
     @property
@@ -160,43 +178,78 @@ class DialogueEngine:
         """A copy of the conversation history, system prompt first."""
         return list(self._messages)
 
+    def add_assistant_message(self, text: str) -> None:
+        """Record something the agent said outside the LLM (the greeting), so the model knows."""
+        self._messages.append(Message(Role.ASSISTANT, text))
+
     async def respond(self, user_text: str) -> AsyncIterator[DialogueEvent]:
         """Handle one caller utterance and stream the agent's reaction.
 
-        Raises LLMError if the backend fails. If that happens before anything was added to the
-        history besides the user message, the user message is dropped too, so the caller can
-        simply retry the same utterance.
+        Each LLM round is attempted twice if the first attempt fails, stalls or comes back
+        empty, on the same messages, so nothing is duplicated in the history. There is no
+        retry once the caller has heard part of the answer, and none after a stall in a
+        stream that had already started (that would double the worst-case wait).
+
+        Raises LLMError if the backend still fails. If that happens in the first round, the
+        user message is dropped from the history, so the caller can simply repeat themselves.
         """
         self._tools.begin_turn()
         checkpoint = len(self._messages)
         self._messages.append(Message(Role.USER, user_text))
 
         for round_index in range(MAX_LLM_ROUNDS):
-            spoken: list[str] = []
-            calls: list[ToolCall] = []
-            splitter = SentenceSplitter()
-            specs = self._tools.specs or None
+            for attempt in (1, 2):
+                spoken: list[str] = []
+                calls: list[ToolCall] = []
+                splitter = SentenceSplitter()
+                specs = self._tools.specs or None
+                started = False  # did the LLM send anything at all?
+                failure: LLMError | None = None
+                retryable = True
 
-            try:
-                async with aclosing(self._llm.stream(self._messages, specs)) as stream:
-                    async for event in stream:
-                        if isinstance(event, TextDelta):
-                            for sentence in splitter.feed(event.text):
-                                spoken.append(sentence)
-                                yield Say(sentence)
-                        elif isinstance(event, ToolCallEvent):
-                            calls.append(event.call)
-                    if tail := splitter.flush():
-                        spoken.append(tail)
-                        yield Say(tail)
-            except LLMError:
+                try:
+                    async with aclosing(self._llm.stream(self._messages, specs)) as stream:
+                        events = aiter(stream)
+                        while True:
+                            timeout = self._event_timeout if started else self._first_event_timeout
+                            try:
+                                async with asyncio.timeout(timeout):
+                                    event = await anext(events)
+                            except StopAsyncIteration:
+                                break
+                            except TimeoutError:
+                                # Only a stall before anything arrived is worth a retry.
+                                retryable = not started
+                                raise LLMError(
+                                    f"no {'more' if started else 'first'} LLM output for {timeout}s"
+                                ) from None
+                            started = True
+                            if isinstance(event, TextDelta):
+                                for sentence in splitter.feed(event.text):
+                                    spoken.append(sentence)
+                                    yield Say(sentence)
+                            elif isinstance(event, ToolCallEvent):
+                                calls.append(event.call)
+                        if tail := splitter.flush():
+                            spoken.append(tail)
+                            yield Say(tail)
+                    if not spoken and not calls:
+                        failure = LLMError("the LLM returned an empty reply")
+                except LLMError as exc:
+                    failure = exc
+                except (asyncio.CancelledError, GeneratorExit):
+                    if spoken:
+                        self._messages.append(Message(Role.ASSISTANT, " ".join(spoken)))
+                    raise
+
+                if failure is None:
+                    break
+                if attempt == 1 and retryable and not spoken:
+                    logger.warning("LLM round failed (%s); retrying once", failure)
+                    continue
                 if round_index == 0:
                     del self._messages[checkpoint:]
-                raise
-            except (asyncio.CancelledError, GeneratorExit):
-                if spoken:
-                    self._messages.append(Message(Role.ASSISTANT, " ".join(spoken)))
-                raise
+                raise failure
 
             if spoken or calls:
                 self._messages.append(

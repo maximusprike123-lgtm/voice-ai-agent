@@ -760,3 +760,13 @@ async def test_stored_record_types_round_trip_through_the_queue_keys(store):
 
 def test_utc_notified_timestamps_are_timezone_aware():
     assert datetime.now(UTC).tzinfo is not None
+
+
+async def test_start_reports_how_many_older_records_it_queued(store):
+    await store.add_booking(make_booking(car="a"))
+    await store.add_message(make_message())
+    sink = NotifyingSink(store, FakeNotifier(), sweep_interval=3600)
+
+    assert await sink.start() == 2
+    assert await sink.start() == 0  # already running
+    await sink.aclose()

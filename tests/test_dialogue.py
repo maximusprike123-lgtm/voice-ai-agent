@@ -550,7 +550,9 @@ async def test_close_during_tool_results_fills_in_missing_results():
 
 
 async def test_llm_error_on_first_round_rolls_back_the_user_message():
-    engine, _, _ = make_engine(text("Первый ответ."), LLMError("boom"), text("Повторный ответ."))
+    engine, _, _ = make_engine(
+        text("Первый ответ."), LLMError("boom"), LLMError("boom"), text("Повторный ответ.")
+    )
     await collect(engine, "раз")
     before = engine.messages
 
@@ -563,7 +565,7 @@ async def test_llm_error_on_first_round_rolls_back_the_user_message():
 
 async def test_llm_error_after_tool_round_keeps_consistent_history():
     call = ToolCall("c1", "submit_booking", "{}")
-    engine, _, _ = make_engine(tool_turn(call), LLMError("boom"))
+    engine, _, _ = make_engine(tool_turn(call), LLMError("boom"), LLMError("boom"))
 
     with pytest.raises(LLMError):
         await collect(engine, "да")
@@ -575,3 +577,178 @@ async def test_llm_error_after_tool_round_keeps_consistent_history():
         Role.ASSISTANT,
         Role.TOOL,
     ]
+
+
+# --- Timeouts, retry, empty replies ---------------------------------------------------------------
+
+
+FAST = {"first_event_timeout": 0.05, "event_timeout": 0.1}
+
+
+def make_fast_engine(*scripts, tools=None, **kwargs):
+    llm = ScriptedLLM(*scripts)
+    engine = DialogueEngine(llm, tools or FakeTools(), "SYS", **(FAST | kwargs))
+    return engine, llm
+
+
+def user_messages(engine):
+    return [m for m in engine.messages if m.role is Role.USER]
+
+
+def test_default_timeouts_are_4s_to_first_event_and_8s_between_events():
+    engine = DialogueEngine(ScriptedLLM(), FakeTools(), "SYS")
+    assert (engine._first_event_timeout, engine._event_timeout) == (4.0, 8.0)
+
+
+async def test_a_stalled_first_token_is_retried_once_without_duplicating_the_user_message():
+    engine, llm = make_fast_engine([ScriptedLLM.HANG], text("Здравствуйте, слушаю вас."))
+
+    events = await collect(engine, "Привет")
+
+    assert events == [Say("Здравствуйте, слушаю вас.")]
+    assert len(llm.calls) == 2 and llm.closed == 2  # the stalled stream was closed
+    assert [m.content for m in user_messages(engine)] == ["Привет"]  # only once
+    assert llm.calls[1] == llm.calls[0]  # the retry sent exactly the same messages
+
+
+async def test_two_stalls_raise_llm_error_within_twice_the_first_event_timeout():
+    engine, llm = make_fast_engine([ScriptedLLM.HANG], [ScriptedLLM.HANG])
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(LLMError, match="no first LLM output"):
+        await collect(engine, "Привет")
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert 0.09 < elapsed < 0.4  # 2 x 0.05s plus scheduling, not 2 x event_timeout
+    assert len(llm.calls) == 2 and llm.closed == 2
+    assert engine.messages == [Message(Role.SYSTEM, "SYS")]  # rolled back: caller may repeat
+
+
+async def test_a_stall_in_a_stream_that_already_started_is_not_retried():
+    engine, llm = make_fast_engine([TextDelta("При"), ScriptedLLM.HANG], text("не должно быть"))
+
+    with pytest.raises(LLMError, match="no more LLM output"):
+        await collect(engine, "Привет")
+
+    assert len(llm.calls) == 1  # no second attempt: that would double the wait
+    assert engine.messages == [Message(Role.SYSTEM, "SYS")]
+
+
+async def test_no_retry_once_the_caller_has_heard_part_of_the_answer():
+    class DropsMidStream(ScriptedLLM):
+        async def stream(self, messages, tools=None):
+            self.calls.append(list(messages))
+            yield TextDelta("Первая фраза. Вторая")
+            raise LLMError("connection dropped")
+
+    llm = DropsMidStream()
+    engine = DialogueEngine(llm, FakeTools(), "SYS", **FAST)
+    heard = []
+
+    with pytest.raises(LLMError, match="connection dropped"):
+        async for event in engine.respond("Привет"):
+            heard.append(event)
+
+    assert heard == [Say("Первая фраза.")]  # spoken before the failure, so no repeat
+    assert len(llm.calls) == 1
+
+
+async def test_a_steady_slow_stream_is_not_mistaken_for_a_stall():
+    class Trickle(ScriptedLLM):
+        async def stream(self, messages, tools=None):
+            self.calls.append(list(messages))
+            for chunk in ("Первая фраза. ", "Вторая фраза. ", "Третья фраза."):
+                await asyncio.sleep(0.04)  # each gap is below event_timeout; the total is above
+                yield TextDelta(chunk)
+            yield StreamEnd("stop")
+
+    llm = Trickle()
+    engine = DialogueEngine(llm, FakeTools(), "SYS", **FAST)
+
+    assert await collect(engine, "x") == [
+        Say("Первая фраза."),
+        Say("Вторая фраза."),
+        Say("Третья фраза."),
+    ]
+    assert len(llm.calls) == 1
+
+
+async def test_a_transport_error_before_any_output_is_retried_once():
+    engine, llm = make_fast_engine(LLMError("HTTP 502"), text("Слушаю вас."))
+
+    assert await collect(engine, "x") == [Say("Слушаю вас.")]
+    assert len(llm.calls) == 2
+
+
+async def test_an_empty_reply_is_retried_then_reported_as_an_error():
+    engine, llm = make_fast_engine([StreamEnd("stop")], text("Слушаю вас."))
+    assert await collect(engine, "x") == [Say("Слушаю вас.")]
+    assert len(llm.calls) == 2
+
+    engine, llm = make_fast_engine([StreamEnd("stop")], [StreamEnd("stop")])
+    with pytest.raises(LLMError, match="empty reply"):
+        await collect(engine, "x")
+    assert len(llm.calls) == 2
+    assert engine.messages == [Message(Role.SYSTEM, "SYS")]
+
+
+async def test_an_empty_reply_after_a_tool_round_keeps_the_tool_results_in_the_history():
+    call = ToolCall("c1", "take_message", "{}")
+    engine, llm = make_fast_engine(tool_turn(call), [StreamEnd("stop")], [StreamEnd("stop")])
+
+    with pytest.raises(LLMError, match="empty reply"):
+        await collect(engine, "x")
+
+    assert [m.role for m in engine.messages] == [
+        Role.SYSTEM,
+        Role.USER,
+        Role.ASSISTANT,
+        Role.TOOL,
+    ]
+    assert len(llm.calls) == 3  # tool round, then empty twice
+
+
+async def test_the_retry_applies_to_later_rounds_too():
+    call = ToolCall("c1", "take_message", "{}")
+    engine, llm = make_fast_engine(tool_turn(call), [ScriptedLLM.HANG], text("Передал."))
+
+    events = await collect(engine, "x")
+
+    assert events == [ToolResult(call, "ok"), Say("Передал.")]
+    assert len(llm.calls) == 3
+    assert [m.role for m in engine.messages].count(Role.TOOL) == 1  # tool ran once, not twice
+
+
+async def test_a_tool_call_only_reply_is_not_empty():
+    call = ToolCall("c1", "end_call", "{}")
+    engine, llm = make_fast_engine(
+        tool_turn(call), tools=FakeTools(outcomes={"end_call": ToolOutcome("ok", ends_call=True)})
+    )
+
+    assert await collect(engine, "x") == [ToolResult(call, "ok"), EndCall()]
+    assert len(llm.calls) == 1
+
+
+async def test_the_retry_warning_is_logged(caplog):
+    engine, _ = make_fast_engine([ScriptedLLM.HANG], text("Слушаю вас."))
+
+    with caplog.at_level("WARNING"):
+        await collect(engine, "x")
+
+    assert "retrying once" in caplog.text
+
+
+def test_add_assistant_message_puts_the_greeting_into_the_history():
+    engine, llm, _ = make_engine(text("Слушаю."))
+    engine.add_assistant_message("Здравствуйте! Чем могу помочь?")
+
+    assert engine.messages[-1] == Message(Role.ASSISTANT, "Здравствуйте! Чем могу помочь?")
+
+
+async def test_the_model_sees_the_greeting_on_the_first_turn():
+    engine, llm, _ = make_engine(text("Слушаю вас."))
+    engine.add_assistant_message("Здравствуйте!")
+
+    await collect(engine, "Хочу записаться")
+
+    assert [m.content for m in llm.calls[0]] == ["SYS", "Здравствуйте!", "Хочу записаться"]

@@ -1,0 +1,13 @@
+# Caller script for: python -m agent.cli --script <this file> --caller +79991234567 --show-tools
+# Books polishing for "Saturday after lunch" with a different phone number than the caller ID.
+# Lines are fed in order, so it cannot adapt to the model's questions. It is written to work
+# whether or not the model adds an extra "Верно?" check after the date (two «да» lines in a
+# row); other deviations will show up as a misaligned transcript, which is informative too.
+Здравствуйте, хочу записаться на полировку кузова.
+Меня зовут Игорь Тестовый.
+Нет, запишите другой: 8 916 123 45 67.
+Тойота Камри.
+В субботу после обеда.
+Да, верно.
+Да, всё верно.
+Нет, спасибо. До свидания.
