@@ -6,7 +6,8 @@ the app (DialogueEngine, tools) speaks only in terms of Message / ToolSpec / Str
 
 import copy
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -15,6 +16,9 @@ import httpx
 
 # Request fields the client sets itself; `extra_body` must not replace them.
 RESERVED_BODY_FIELDS = frozenset({"model", "messages", "stream", "tools", "reasoning_effort"})
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -136,6 +140,10 @@ class OpenAICompatibleLLMClient:
     # e.g. OpenRouter's {"provider": {"sort": "latency"}}. None: nothing is added. It may not
     # override the fields this client owns.
     extra_body: dict[str, Any] | None = None
+    # Optional: called with the backend's `usage` object (prompt_tokens, completion_tokens, ...)
+    # once per request, e.g. for cost accounting. Setting it makes the client ask for usage in
+    # the stream (`stream_options.include_usage`) and read the stream to its end to receive it.
+    usage_hook: Callable[[dict[str, Any]], None] | None = None
     timeout_seconds: float = 60.0
     _client: httpx.AsyncClient | None = field(default=None, repr=False, compare=False)
 
@@ -169,6 +177,8 @@ class OpenAICompatibleLLMClient:
             body["tools"] = [t.to_api() for t in tools]
         if self.reasoning_effort is not None:
             body["reasoning_effort"] = self.reasoning_effort
+        if self.usage_hook is not None:
+            body["stream_options"] = {"include_usage": True}
         if self.extra_body:
             body.update(copy.deepcopy(self.extra_body))
         return body
@@ -196,6 +206,7 @@ class OpenAICompatibleLLMClient:
 
     async def _parse_sse(self, response: httpx.Response) -> AsyncIterator[StreamEvent]:
         pending_calls: dict[int, _PendingToolCall] = {}
+        finished = False  # the finish chunk was seen; only the usage chunk can still follow
 
         async for line in response.aiter_lines():
             if not line.startswith("data:"):
@@ -209,8 +220,12 @@ class OpenAICompatibleLLMClient:
             except json.JSONDecodeError as exc:
                 raise LLMError(f"malformed SSE chunk from LLM backend: {payload[:200]}") from exc
 
+            usage = chunk.get("usage")
+            if usage and self.usage_hook is not None:
+                self._report_usage(usage)
+
             choices = chunk.get("choices") or []
-            if not choices:
+            if not choices or finished:
                 continue
             choice = choices[0]
             delta = choice.get("delta") or {}
@@ -238,4 +253,13 @@ class OpenAICompatibleLLMClient:
                 for pending in pending_calls.values():
                     yield ToolCallEvent(pending.to_call())
                 yield StreamEnd(finish_reason)
-                return
+                if self.usage_hook is None:
+                    return
+                finished = True  # keep reading: the usage chunk comes after the finish chunk
+
+    def _report_usage(self, usage: dict[str, Any]) -> None:
+        try:
+            assert self.usage_hook is not None
+            self.usage_hook(usage)
+        except Exception:  # accounting must never break a call
+            logger.exception("usage_hook raised")

@@ -357,3 +357,117 @@ async def test_extra_body_is_copied_so_a_request_cannot_change_the_configuration
     body["provider"]["order"].append("SomebodyElse")
 
     assert extra == {"provider": {"order": ["Fireworks"]}}
+
+
+# --- usage_hook -----------------------------------------------------------------------------------
+
+USAGE = {"prompt_tokens": 2200, "completion_tokens": 40, "total_tokens": 2240}
+
+
+def usage_stream() -> bytes:
+    """A stream the way OpenAI-compatible backends send it with include_usage: the finish chunk,
+    then a chunk with empty `choices` and the usage, then [DONE]."""
+    return sse(
+        chunk({"role": "assistant", "content": "Привет"}),
+        chunk({}, finish_reason="stop"),
+        {"choices": [], "usage": USAGE},
+        "[DONE]",
+    )
+
+
+async def test_usage_hook_receives_the_usage_that_follows_the_finish_chunk():
+    seen = []
+    client = make_client(
+        lambda r: httpx.Response(200, content=usage_stream()), usage_hook=seen.append
+    )
+
+    events = [e async for e in client.stream([Message(Role.USER, "hi")])]
+
+    assert events == [TextDelta("Привет"), StreamEnd("stop")]
+    assert seen == [USAGE]
+
+
+async def test_usage_hook_requests_usage_in_the_stream_only_when_set():
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, content=usage_stream())
+
+    with_hook = make_client(handler, usage_hook=lambda usage: None)
+    without_hook = make_client(handler)
+    [_ async for _ in with_hook.stream([Message(Role.USER, "hi")])]
+    [_ async for _ in without_hook.stream([Message(Role.USER, "hi")])]
+
+    assert captured[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in captured[1]
+
+
+async def test_without_a_hook_the_stream_still_ends_at_the_finish_chunk():
+    """Existing behaviour is unchanged: nothing after the finish chunk is read or reported."""
+    body = sse(chunk({"content": "Да"}, finish_reason="stop"), "this is not json at all")
+    client = make_client(lambda r: httpx.Response(200, content=body))
+
+    events = [e async for e in client.stream([Message(Role.USER, "hi")])]
+
+    assert events == [TextDelta("Да"), StreamEnd("stop")]  # the garbage after it is never parsed
+
+
+async def test_usage_hook_is_called_once_per_request_and_tool_calls_still_work():
+    seen = []
+    body = sse(
+        chunk(
+            {
+                "tool_calls": [
+                    {"index": 0, "id": "c1", "function": {"name": "end_call", "arguments": "{}"}}
+                ]
+            },
+            finish_reason="tool_calls",
+        ),
+        {"choices": [], "usage": USAGE},
+        "[DONE]",
+    )
+    client = make_client(lambda r: httpx.Response(200, content=body), usage_hook=seen.append)
+
+    events = [e async for e in client.stream([Message(Role.USER, "hi")])]
+
+    assert events == [ToolCallEvent(ToolCall("c1", "end_call", "{}")), StreamEnd("tool_calls")]
+    assert seen == [USAGE]
+
+
+async def test_a_backend_that_sends_no_usage_simply_never_calls_the_hook():
+    seen = []
+    body = sse(chunk({"content": "Да"}, finish_reason="stop"), "[DONE]")
+    client = make_client(lambda r: httpx.Response(200, content=body), usage_hook=seen.append)
+
+    [_ async for _ in client.stream([Message(Role.USER, "hi")])]
+
+    assert seen == []
+
+
+async def test_a_failing_hook_never_breaks_the_stream(caplog):
+    def broken(usage):
+        raise RuntimeError("accounting bug")
+
+    client = make_client(lambda r: httpx.Response(200, content=usage_stream()), usage_hook=broken)
+
+    events = [e async for e in client.stream([Message(Role.USER, "hi")])]
+
+    assert events == [TextDelta("Привет"), StreamEnd("stop")]
+    assert "usage_hook raised" in caplog.text
+
+
+async def test_usage_hook_and_extra_body_combine():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, content=usage_stream())
+
+    client = make_client(
+        handler, usage_hook=lambda usage: None, extra_body={"provider": {"sort": "latency"}}
+    )
+    [_ async for _ in client.stream([Message(Role.USER, "hi")])]
+
+    assert captured["provider"] == {"sort": "latency"}
+    assert captured["stream_options"] == {"include_usage": True}

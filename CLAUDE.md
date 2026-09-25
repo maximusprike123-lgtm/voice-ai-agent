@@ -209,12 +209,48 @@ state), and with `--notify` waits up to 30s for delivery. `--notify` also resend
 unnotified record in that database (it says so). Bad arguments → exit 2, bad config / unusable
 database → exit 1 without printing secret values.
 
-**Next: 1.10 — scenario tests against the real LLM:** an adaptive simulated caller, several
-runs per scenario, assertions on tool arguments / saved records / spoken read-backs, and a
-script check for non-Cyrillic/Latin characters in replies.
+1.10 (scenario evals, `evals/` package, run with `python -m evals`; on demand, NOT in pytest):
+an **adaptive simulated caller** (an LLM with a persona, facts and behavior per scenario; it
+hears only the agent's spoken sentences and ends with `[КОНЕЦ]`) talks to the real
+`CallSession` + `ToolRegistry` + a temporary SQLite database, on a fixed clock (Friday
+2026-09-25 15:00 Moscow). 10 scenarios (happy_path_booking, approximate_time, changes_mind,
+hidden_caller_id, service_not_listed, question_outside_faq, price_only, rude_offtopic,
+address_only, sunday_closed), each run N times (default 5, concurrency 4). Assertions are on
+OUTCOMES: 8 invariants for every run (no foreign script; no «записал» before a successful
+confirm; no price outside the price list; no full phone number spoken; no «запись
+подтверждена» claim; confirm only after a read-back on an earlier turn; no premature confirm
+attempt; no `end_call` in the turn of a save) plus per-scenario checks on saved records and
+speech. A run passes only if ALL its checks pass; infra errors (LLM failures after the
+engine's retry) and inconclusive runs (turn cap, broken caller) are reported separately and
+excluded from the rates. Output: per-scenario pass rate, per-check breakdown, invariant
+matrix, tokens and approximate cost; `data/evals/<time>/` gets report.txt, results.json,
+transcripts.txt. Options: `--dry-run` (plan + cost estimate), `--scenarios`, `--runs`,
+`--concurrency`, `--caller-model`, `--max-cost` (default $2, refuses/stops above it),
+`--show-failures`, `--min-pass-rate`. The simulated caller defaults to the first working of
+gemini-2.5-flash-lite / gpt-4.1-nano / mistral-small-3.2 / llama-3.3-70b (a different family
+from the agent, each probed against this account's privacy filters; the agent's own model
+only as a last resort). The harness has its own offline tests (checks, "ideal run" per
+scenario, caller, harness, cost, report, CLI). Small production additions: `text_guard.
+foreign_script_chars()` (the guard for TTS text; not yet wired into the audio path),
+`ru_words.spoken_amounts()` / `longest_number_run()` (read prices and phone digits back out
+of spoken text), `LLMClient.usage_hook` (opt-in token accounting), and a **same-turn confirm
+guard**: `confirm_booking` returns `ОШИБКА` if the draft was prepared in the current turn, so
+the model cannot skip the caller's «да» by calling prepare + confirm together. pytest now
+puts the repo root on `pythonpath` so tests can import `evals`.
 
-**Remaining roadmap (from the original plan):** 1.10 tests incl. scripted scenario dialogues against the real LLM. Then step 2 (STT/TTS,
-local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
+**Baseline sweep (2026-09-25, DeepSeek v4.1 flash agent, Gemini flash-lite caller, 50 runs,
+~$0.06, ~4 min): raw pass rate 16/46 gradable = 35%** — happy_path_booking 60%,
+approximate_time 0%, changes_mind 25%, hidden_caller_id 0%, service_not_listed 0%,
+question_outside_faq 0%, price_only 100%, rude_offtopic 100%, address_only 0%,
+sunday_closed 40%; 4 infra errors. **The raw numbers are dominated by harness artifacts, not
+by the agent** (see Known open issues). Invariants: 46/46 for every one except «no
+записал before confirm» (44/46). Nothing was tuned after the sweep.
+
+**Next:** decide what to do about the baseline (see the open issue «1.10 baseline is
+contaminated»), then step 2 (STT/TTS, local mic).
+
+**Remaining roadmap:** step 2 (STT/TTS, local mic) and step 3 (Asterisk + AudioSocket on the
+real VPS).
 
 ## Known open issues
 
@@ -236,9 +272,11 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   hybrid/recurrent-state model that can't rewind to a mid-prompt point. The layout stays: it
   is free and helps backends with real prefix caching. Keep Ollama for offline logic
   development only.
-- **Small Qwen models sometimes insert Chinese characters** (seen once on qwen3.5:4b:
-  "тридцати五千 рублей"). Step 1.10 scenario tests must check replies for non-Cyrillic/Latin
-  scripts, and a guard is needed before TTS. Applies to any backend, not only Qwen.
+- **Foreign-script characters in spoken text** (Chinese seen once on qwen3.5:4b: «тридцати五千
+  рублей»): `agent.text_guard.foreign_script_chars()` exists and the 1.10 invariant
+  `no_foreign_script` found none in 46 DeepSeek runs, but nothing in the production path uses
+  the guard yet. Decide in step 2 what to do on a hit (regenerate / drop the sentence) before
+  text reaches TTS. Applies to any backend.
 - **Conversation-level rule compliance is still model-dependent** (`live_booking_dialogue.py`,
   caller: "в субботу после обеда"). qwen3.5:4b (3 runs, old one-step flow): invented
   placeholders, skipped confirmation, invented `preferred_time`, needless `take_message`,
@@ -296,13 +334,42 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   `alibaba`, `streamlake`, `gmicloud` and `atlas-cloud` from routing; pinning `DeepSeek` fails
   with HTTP 404 "No endpoints found". Good for customer data (names, phone numbers), but the
   eligible set is US/EU infra providers, and changing those settings changes the latency picture.
-- **Fixed-order `--script` callers are fragile** (a model that inserts one extra «Верно?» shifts
-  every later answer: the first live run answered the read-back with «Нет, спасибо» and
-  correctly hung up without booking). `scripts/scenarios/*.txt` are for eyeballing; the 1.10
-  scenario tests need an adaptive simulated caller (like `live_booking_dialogue.py`'s keyword
-  matching, or an LLM-played caller) and must assert on tool arguments / saved records.
+- **1.10 baseline is contaminated by the simulated caller and by some checks: do NOT read the
+  raw 35% as the agent's quality.** Triage of the 30 failed runs from transcripts:
+  (a) **~19 = the caller LLM hung up too early** — Gemini flash-lite appends `[КОНЕЦ]` to its
+  very first line (measured: 9/10 samples for hidden_caller_id, 5/10 for question_outside_faq,
+  0/10 for happy_path/address_only) or to «Да, всё верно.», so the run ends while the agent's
+  question («Как вас зовут?») is unanswered or before the agent could hang up. These runs are
+  counted "completed" and fail almost every check; they should be inconclusive.
+  (b) **~10 = check/scenario design:** `agent_ended_call` in address_only (5/5 fail: the caller
+  only says «Спасибо большое!», no farewell, the agent asks «Что-то ещё подсказать?»; not
+  obviously wrong); `prepared_at_least_2` in changes_mind (the caller changed its mind at the
+  agent's OWN informal recap («Уточню: … Верно?») before the first `prepare_booking`, so there
+  was only one prepare although the final booking was exactly right: Monday morning, one
+  record); service_not_listed 0/5 (the persona asks «вы такое делаете?», the agent takes a
+  `take_message` instead of booking `other`, which is defensible and the persona never says it
+  wants to book).
+  (c) **Real agent findings (few):** «Хорошо, записал» / «всё записал» said before the booking
+  was confirmed, 2/4 gradable approximate_time runs (a prompt rule violation); the model's
+  own redundant recap («Уточню: … Верно?») before `prepare_booking` (seen in changes_mind and
+  approximate_time); after a plain «спасибо» without a farewell it does not call `end_call`.
+  **Proposed harness fixes, NOT applied (baseline left as measured, waiting for approval):**
+  honor `[КОНЕЦ]` only on a farewell line and otherwise strip it and continue (or mark the run
+  inconclusive); re-probe candidate caller models for their marker rate (gpt-4.1-nano, mistral)
+  and pick by it; make `agent_ended_call` conditional on the caller's last line being a
+  farewell; replace `prepared_at_least_2` with outcome checks (one booking, final slot, none
+  for the abandoned slot); accept take_message OR an `other`/`ppf` booking in
+  service_not_listed, or make the persona state that it wants to book; optionally add a check
+  against the agent's own recap before `prepare_booking`.
+- **Infra noise in the sweep:** 10 LLM rounds timed out at the 4s first-token limit (OpenRouter,
+  Together/Fireworks order) across ~190 agent requests; the engine's retry rescued 6 and the
+  other 4 became failed turns, so 4/50 runs were infra errors (8%), in line with the
+  latency-study tail. `--concurrency 4` may add some load.
+- **The 1.10 cost estimate is 2.5x too high:** actual ~$0.061 for 50 runs (~12.5k agent tokens
+  and ~2k caller tokens per run) versus the estimate's 25k + 9k; adjust
+  `ESTIMATED_TOKENS_PER_RUN` in `evals/cost.py`.
 - **The model adds redundant checks** («Уточню: … Верно?» about the date before
-  `prepare_booking`, or re-asking the time): harmless but slows calls; left to 1.10.
+  `prepare_booking`, or re-asking the time): measured in 1.10, see above; not fixed.
 - **Empty model reply:** now handled (1.9): the engine retries once, then raises `LLMError`,
   and `CallSession` says the fallback phrase. (Seen once on qwen3.5:4b.)
 
@@ -319,6 +386,8 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 .venv/bin/python scripts/live_booking_dialogue.py  # scripted caller books via the real LLM + tools
 .venv/bin/python scripts/send_test_notification.py  # ONE real test message to the owner's Telegram
 .venv/bin/python scripts/latency_study.py            # TTFT p50/p90/p99 per OpenRouter routing (~4 min, cents)
+.venv/bin/python -m evals --dry-run                  # scenario evals: plan + cost estimate, no LLM calls
+.venv/bin/python -m evals [--scenarios a,b] [--runs 5]  # REAL LLM calls (~$0.06 per 50 runs), on demand only
 .venv/bin/python -m agent.cli --show-tools           # talk to the agent in the terminal (see 1.9)
 .venv/bin/python -m agent.cli --script scripts/scenarios/booking_saturday_afternoon.txt \
     --caller +79991234567 --show-tools --db /tmp/scratch.db   # scripted call; add --notify for real Telegram

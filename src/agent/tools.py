@@ -196,6 +196,7 @@ class ToolRegistry:
         self._clock = clock
         self._caller_phone = caller_phone
         self._draft: dict[str, Any] | None = None  # raw arguments of the pending booking
+        self._draft_turn: int | None = None  # the turn in which the draft was prepared
         self._submitted: set[tuple] = set()
         self._turn = 0  # counts caller utterances (see begin_turn)
         self._confirmed_in_turn: int | None = None  # turn of the last accepted booking
@@ -242,6 +243,7 @@ class ToolRegistry:
             )
 
         self._draft = args  # replaces any earlier draft
+        self._draft_turn = self._turn
         return ToolOutcome(
             result=(
                 "Заявка подготовлена, клиенту уже зачитан текст для проверки. Ничего не "
@@ -256,6 +258,14 @@ class ToolRegistry:
             return _error(
                 "нет подготовленной заявки. Сначала вызови prepare_booking; confirm_booking "
                 "только после того, как клиент согласился с зачитанным текстом."
+            )
+        if self._draft_turn == self._turn:
+            # prepare_booking and confirm_booking in the same turn: the caller has not heard the
+            # read-back yet, let alone said «да». Refuse; the draft stays for the next turn.
+            return _error(
+                "клиент ещё не ответил на зачитанный текст проверки, подтверждать заявку рано. "
+                "Ничего не отправлено. Дождись ответа клиента; confirm_booking вызывай только "
+                "в следующей реплике, после его «да»."
             )
         now = self._now()
         # Re-validate: the call may have run past closing time or midnight since the draft.

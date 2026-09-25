@@ -75,6 +75,8 @@ async def prepare(tools, **overrides):
 
 
 async def confirm(tools):
+    """confirm_booking as the model calls it: on the turn AFTER the read-back («да»)."""
+    tools.begin_turn()
     return await call(tools, "confirm_booking")
 
 
@@ -236,6 +238,7 @@ async def test_confirm_without_a_draft_is_an_error(tools, sink):
 
 async def test_confirm_takes_no_arguments_and_ignores_any(tools, sink):
     await prepare(tools)
+    tools.begin_turn()
     outcome = await call(tools, "confirm_booking", {"name": "Другой человек"})
     assert not is_error(outcome)
     assert sink.bookings[0].name == "Игорь"
@@ -737,6 +740,74 @@ async def test_the_caller_can_hang_up_on_the_turn_after_the_acceptance(business,
     last = await collect_events(engine, "Нет, спасибо")
 
     assert last[-1] == EndCall() and Say("Всего доброго!") in last
+
+
+# --- confirm_booking only after the caller had a turn to answer the read-back ---------------------
+
+
+async def test_confirm_in_the_same_turn_as_prepare_is_refused_and_saves_nothing(tools, sink):
+    tools.begin_turn()
+    prepared = await call(tools, "prepare_booking", valid_args())
+    outcome = await call(tools, "confirm_booking")  # the model calls both in one go
+
+    assert not is_error(prepared) and prepared.say == DEFAULT_READ_BACK
+    assert is_error(outcome) and not outcome.committed and outcome.say is None
+    assert "ещё не ответил" in outcome.result and "в следующей реплике" in outcome.result
+    assert sink.bookings == []
+
+
+async def test_the_refused_draft_is_kept_and_confirms_on_the_next_turn(tools, sink):
+    tools.begin_turn()
+    await call(tools, "prepare_booking", valid_args())
+    assert is_error(await call(tools, "confirm_booking"))
+
+    tools.begin_turn()  # the caller says «да»
+    outcome = await call(tools, "confirm_booking")
+
+    assert not is_error(outcome) and outcome.committed
+    assert len(sink.bookings) == 1
+
+
+async def test_a_refused_confirm_does_not_arm_the_end_call_guard(tools):
+    tools.begin_turn()
+    await call(tools, "prepare_booking", valid_args())
+    await call(tools, "confirm_booking")  # refused: nothing was accepted
+    assert (await call(tools, "end_call")).ends_call
+
+
+async def test_a_reprepared_draft_needs_its_own_later_turn(tools, sink):
+    tools.begin_turn()
+    await call(tools, "prepare_booking", valid_args(car="Toyota Camry"))
+    tools.begin_turn()  # the caller corrects something instead of confirming
+    await call(tools, "prepare_booking", valid_args(car="BMW X5"))
+
+    assert is_error(await call(tools, "confirm_booking"))  # same turn as the new prepare
+    tools.begin_turn()
+    assert not is_error(await call(tools, "confirm_booking"))
+    assert [b.car for b in sink.bookings] == ["BMW X5"]
+
+
+async def test_the_model_cannot_skip_the_callers_yes_through_the_engine(business, sink):
+    """prepare + confirm in ONE model round: only the read-back is spoken, nothing is saved."""
+    llm = ScriptedLLM(
+        [
+            ToolCallEvent(prepare_call()),
+            ToolCallEvent(ToolCall("c2", "confirm_booking", "{}")),
+            StreamEnd("tool_calls"),
+        ],
+        tool_round(ToolCall("c3", "confirm_booking", "{}")),
+    )
+    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+
+    first = await collect_events(engine, "Запишите меня, всё как обычно")
+
+    results = [e for e in first if isinstance(e, ToolResult)]
+    assert results[0].committed is False and results[1].result.startswith(ERROR_PREFIX)
+    assert " ".join(e.text for e in first if isinstance(e, Say)) == DEFAULT_READ_BACK
+    assert sink.bookings == [] and len(llm.calls) == 1
+
+    second = await collect_events(engine, "Да, всё верно")  # now the caller really answered
+    assert len(sink.bookings) == 1 and second[0].committed
 
 
 # --- Malformed calls ------------------------------------------------------------------------------

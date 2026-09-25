@@ -417,6 +417,7 @@ async def test_prepare_and_confirm_store_the_booking_in_sqlite(sink):
     await tools.execute(ToolCall("c1", "prepare_booking", BOOKING_ARGS))
     assert await sink.list_bookings() == []  # nothing before confirm
 
+    tools.begin_turn()  # the caller answered the read-back
     outcome = await tools.execute(ToolCall("c2", "confirm_booking", "{}"))
 
     assert not outcome.result.startswith("ОШИБКА")
@@ -444,12 +445,14 @@ async def test_a_storage_failure_is_reported_to_the_model_and_the_draft_survives
     await tools.execute(ToolCall("c1", "prepare_booking", BOOKING_ARGS))
     await broken.close()  # the database goes away mid-call
 
+    tools.begin_turn()
     failed = await tools.execute(ToolCall("c2", "confirm_booking", "{}"))
     assert failed.result.startswith("ОШИБКА") and "не удалось" in failed.result
 
     recovered = await SqliteSink.open(db_path)  # e.g. the disk problem is fixed
     try:
         tools._sink = recovered
+        tools.begin_turn()
         again = await tools.execute(ToolCall("c3", "confirm_booking", "{}"))
         assert not again.result.startswith("ОШИБКА")
         assert len(await recovered.list_bookings()) == 1  # saved exactly once

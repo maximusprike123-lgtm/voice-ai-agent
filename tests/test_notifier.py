@@ -733,6 +733,7 @@ async def test_confirm_booking_returns_at_once_while_telegram_is_down(store):
         load_business_config(REPO_CONFIG), sink, clock=lambda: NOW, caller_phone="+79991234567"
     )
     await tools.execute(ToolCall("c1", "prepare_booking", BOOKING_ARGS))
+    tools.begin_turn()  # the caller answered the read-back
 
     outcome = await asyncio.wait_for(tools.execute(ToolCall("c2", "confirm_booking", "{}")), 1.0)
 

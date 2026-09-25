@@ -28,6 +28,8 @@ packages = ["src/agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# the repo root, so tests can import the evals/ package (it is not installed, run as -m evals)
+pythonpath = ["."]
 addopts = "-q"
 asyncio_mode = "auto"
 
