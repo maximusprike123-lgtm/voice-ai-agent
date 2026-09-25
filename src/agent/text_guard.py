@@ -2,14 +2,16 @@
 
 Code enforces guarantees the prompt cannot (see CLAUDE.md). Measured on real calls, the model
 sometimes reads a full phone number aloud, says «записал» before anything is saved, says «заявка
-принята» without ever calling confirm_booking, or slips characters from another script into a
-Russian sentence («тридцати五千 рублей»). `SpeechGuard.check` finds those, with no LLM call. What
-happens to a blocked sentence is decided by the caller: DialogueEngine drops it, and only if the
+принята» without ever calling confirm_booking, writes the CALLER's lines or a role label into its
+own reply («userЗаписывай на тот, что я продиктовал…»), or slips characters from another script
+into a Russian sentence («тридцати五千 рублей»). `SpeechGuard.check` finds those, with no LLM
+call. What happens to a blocked sentence is decided by the caller: DialogueEngine drops it, and
+only if the
 whole reply would then be silent asks the model once more (with `correction_note`) or speaks the
 neutral fallback for the rule. Text the code itself wrote (read-back, acceptance, greeting) is
 not checked. The audio pipeline (step 2) reuses the same guard before TTS.
 
-Rules, in order: foreign_script, phone_digits, acceptance_claim, written_down.
+Rules, in order: foreign_script, role_leakage, phone_digits, acceptance_claim, written_down.
 """
 
 import logging
@@ -39,11 +41,24 @@ ACCEPTANCE_CLAIM = re.compile(
     r"|запись\s+оформлена",
     re.I,
 )
+# Role leakage: the model writes a role label («user», «assistant», «system», «Клиент:», «Агент:»)
+# or speaks as the caller. Latin role words count when they open the sentence, carry a colon, or
+# are glued to Cyrillic («userЗаписывай»); inside other Latin words («ecosystem») they do not.
+_LATIN_ROLES = r"(?:user|assistant|system)"
+ROLE_LEAKAGE = re.compile(
+    rf"^\s*{_LATIN_ROLES}\b"
+    rf"|\b{_LATIN_ROLES}\s*[:：]"
+    rf"|(?<=[А-Яа-яЁё]){_LATIN_ROLES}"
+    rf"|{_LATIN_ROLES}(?=[А-Яа-яЁё])"
+    r"|(?<![А-Яа-яЁёA-Za-z])(?:клиент|агент|администратор|ассистент|пользователь|система)\s*[:：]",
+    re.I,
+)
 WRITTEN_DOWN = re.compile(r"\bзаписал[аи]?\b|\bзаписан[оа]?\b", re.I)
 
 # What is said instead when a whole reply was blocked and the corrective round failed too.
 # Gender-neutral, no digits, and they never blame the caller.
 GUARD_FALLBACKS = {
+    "role_leakage": "Давайте продолжим.",
     "phone_digits": "Хорошо, номер есть.",
     "acceptance_claim": "Давайте ещё раз проверим данные заявки.",
     "written_down": "Хорошо.",
@@ -53,6 +68,11 @@ GUARD_FALLBACKS = {
 # Hidden notes for the model (never spoken) that explain what was blocked, for the corrective
 # round. {sentence} is the blocked text.
 _CORRECTIONS = {
+    "role_leakage": (
+        "Твоя фраза «{sentence}» заблокирована: в ней служебное слово или реплика от имени "
+        "клиента (user, assistant, system, «Клиент:», «Агент:»). Отвечай только своей репликой "
+        "администратора, без ролей и без слов за клиента."
+    ),
     "phone_digits": (
         "Твоя фраза «{sentence}» заблокирована: нельзя произносить цифры телефона. Продолжи "
         "разговор без них: задай следующий вопрос или вызови нужный инструмент."
@@ -109,6 +129,8 @@ class SpeechGuard:
         """The first rule the sentence breaks, or None. Does not record or log."""
         if chars := foreign_script_chars(sentence):
             return Violation("foreign_script", sentence, f"characters {sorted(set(chars))}")
+        if ROLE_LEAKAGE.search(sentence):
+            return Violation("role_leakage", sentence, "a role label or the caller's words")
         if _is_phone_dictation(sentence):
             return Violation("phone_digits", sentence, "digits or number words of a phone number")
         if self.committed:

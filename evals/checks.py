@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable
 from datetime import date, time
 
 from agent.ru_words import longest_number_run, spoken_amounts
-from agent.text_guard import ACCEPTANCE_CLAIM, WRITTEN_DOWN, foreign_script_chars
+from agent.text_guard import ACCEPTANCE_CLAIM, ROLE_LEAKAGE, WRITTEN_DOWN, foreign_script_chars
 from agent.tools import normalize_phone
 from evals.caller import is_farewell
 from evals.model import Check, CheckContext, CheckResult, Item, RunResult
@@ -50,6 +50,15 @@ def _sentences_matching(run: RunResult, pattern: re.Pattern | str) -> list[str]:
 def no_foreign_script(run: RunResult, ctx: CheckContext) -> CheckResult:
     bad = sorted({ch for i in run.says() for ch in foreign_script_chars(i.text)})
     return result("no_foreign_script", not bad, f"characters {bad} in spoken text")
+
+
+@named("no_role_leakage")
+def no_role_leakage(run: RunResult, ctx: CheckContext) -> CheckResult:
+    """The agent never speaks a role label or the caller's words («userЗаписывай…»)."""
+    for item in run.says():
+        if ROLE_LEAKAGE.search(item.text):
+            return result("no_role_leakage", False, f"spoke a role marker: {item.text!r}")
+    return result("no_role_leakage", True)
 
 
 @named("no_записал_before_confirm")
@@ -197,6 +206,7 @@ def saved_phone_is_the_dictated_number(run: RunResult, ctx: CheckContext) -> Che
 
 INVARIANTS: tuple[Check, ...] = (
     no_foreign_script,
+    no_role_leakage,
     no_written_down_before_confirm,
     no_invented_prices,
     no_full_phone_spoken,
@@ -390,6 +400,14 @@ def prepared_at_least(times: int) -> Check:
     return check
 
 
+# «The quoted price is a range; the exact price is decided later»: the master, an inspection, or
+# any equivalent wording («точная цена зависит от размера и состояния автомобиля»).
+FINAL_PRICE_HEDGE = (
+    r"мастер|осмотр|зависит от|окончательн|уточн|определ\w+|"
+    r"точн\w+\s+(?:цен|стоимост)|ориентировочн|примерн"
+)
+
+
 def speech_matches(name: str, pattern: str) -> Check:
     """Some spoken sentence matches the pattern (case-insensitive)."""
 
@@ -457,15 +475,44 @@ def no_terms_invented() -> Check:
     return check
 
 
-def other_service_has_no_price() -> Check:
-    """If the request went in as «other» the agent must not have named any price."""
+def other_service_has_no_price(item_pattern: str | None = None) -> Check:
+    """If the request went in as «other», the agent must not have priced the unlisted service.
+
+    Quoting the price of a LISTED alternative is fine («такой услуги нет, есть оклейка защитной
+    плёнкой от двадцати тысяч рублей»): every amount spoken must be in the price list (that is
+    also the no_invented_prices invariant), and, if `item_pattern` names what the caller asked
+    for («фар»), no clause about that item may carry an amount at all."""
 
     @named("other_service_no_price")
     def check(run: RunResult, ctx: CheckContext) -> CheckResult:
         if not any(b.service_id == "other" for b in run.bookings):
             return result("other_service_no_price", True)
-        said = sorted({a for i in run.says() for a in spoken_amounts(i.text)})
-        return result("other_service_no_price", not said, f"amounts said: {said}")
+        listed = {
+            price
+            for service in ctx.business.services
+            for price in (service.price_from, service.price_to)
+            if price is not None
+        }
+        for item in run.says():
+            amounts = spoken_amounts(item.text) if _MONEY_CUE.search(item.text) else []
+            if any(a not in listed for a in amounts):
+                return result(
+                    "other_service_no_price",
+                    False,
+                    f"an amount not in the price list: {item.text!r}",
+                )
+            if amounts and item_pattern:
+                # Clause by clause (commas, semicolons; NOT dashes: «оклейка фар — от 20 000 ₽»
+                # prices the item), so «оклейка плёнкой — от 20 000 ₽, а фары уточнит мастер»
+                # does not count as pricing the headlights.
+                for clause in re.split(r"[,;]", item.text):
+                    if re.search(item_pattern, clause, re.I) and spoken_amounts(clause):
+                        return result(
+                            "other_service_no_price",
+                            False,
+                            f"priced the unlisted service /{item_pattern}/: {item.text!r}",
+                        )
+        return result("other_service_no_price", True)
 
     return check
 

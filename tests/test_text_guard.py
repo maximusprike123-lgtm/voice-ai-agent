@@ -89,6 +89,13 @@ REAL_VIOLATIONS = [
     ("Заявка уже оформлена.", "acceptance_claim"),
     ("Ваша просьба принята.", "acceptance_claim"),
     ("Оформлю заявку. 五千 рублей.", "foreign_script"),
+    # Role leakage, verbatim from a live probe: the model wrote the CALLER's line into its own
+    # reply, digits included (the role rule is checked before the phone rule).
+    (
+        "userЗаписывай на тот, что я продиктовал — восемь девять один шесть, один два три, "
+        "сорок пять, шестьдесят семь.",
+        "role_leakage",
+    ),
 ]
 
 # Sentences the model (or the code) legitimately says in real calls: none may be blocked.
@@ -223,7 +230,81 @@ def test_a_question_about_acceptance_is_not_a_claim_but_the_word_written_down_st
 def test_rules_are_checked_in_the_documented_order():
     both = "Записал номер 8 916 123 45 67 五"
     assert SpeechGuard().check(both).rule == "foreign_script"
+    assert SpeechGuard().check("user: Записал номер 8 916 123 45 67").rule == "role_leakage"
     assert SpeechGuard().check("Записал номер 8 916 123 45 67").rule == "phone_digits"
+
+
+# --- role_leakage ---------------------------------------------------------------------------------
+
+LEAKED = (
+    "userЗаписывай на тот, что я продиктовал — восемь девять один шесть, один два три, "
+    "сорок пять, шестьдесят семь."
+)
+
+
+def test_the_real_leaked_sentence_is_a_role_leak_not_just_a_phone_number():
+    violation = SpeechGuard().check(LEAKED)
+    assert violation == Violation("role_leakage", LEAKED, "a role label or the caller's words")
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "user: Здравствуйте",
+        "User Здравствуйте",  # opens the sentence
+        "assistant: Чем помочь?",
+        "Assistant Чем помочь?",
+        "system: ответь коротко",
+        "Хорошо. system: ответь коротко",  # a colon after the marker, anywhere
+        "Ладно, userЯ согласен.",  # glued to Cyrillic after
+        "Ладноuser согласен.",  # glued to Cyrillic before
+        "Клиент: Меня зовут Игорь.",
+        "Агент: Здравствуйте!",
+        "Администратор: Слушаю вас.",
+        "Ассистент: Слушаю.",
+        "Пользователь: привет",
+        "«Клиент:» Игорь",
+    ],
+)
+def test_role_markers_are_blocked(sentence):
+    assert SpeechGuard().check(sentence).rule == "role_leakage"
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Мы работаем с Kia Rio и BMW X5.",
+        "Ставим Ecosystem audio и Systemax.",  # Latin words that merely contain a role word
+        "Audio system BMW в наличии.",  # a role word in the middle of Latin text, no colon
+        "Системы безопасности у нас нет.",
+        "Администратор перезвонит вам.",  # a role word without a colon
+        "Клиент уже назвал номер.",  # third person, no colon: not a label
+        "Ассистента у нас нет, но администратор поможет.",
+        "Мы сообщим клиенту, когда всё будет готово.",
+        "Пользуйтесь нашей парковкой.",
+        "Агентство нас не устраивает.",
+    ],
+)
+def test_ordinary_sentences_that_mention_similar_words_are_not_blocked(sentence):
+    assert SpeechGuard().check(sentence) is None
+
+
+def test_a_full_width_colon_is_blocked_too_by_the_foreign_script_rule():
+    assert SpeechGuard().check("КЛИЕНТ： Игорь").rule == "foreign_script"
+
+
+def test_role_leakage_is_blocked_even_after_a_save():
+    guard = SpeechGuard()
+    guard.note_commit()
+    assert guard.check("Клиент: Да, всё верно.").rule == "role_leakage"
+
+
+def test_the_role_leakage_fallback_and_note():
+    from agent.text_guard import correction_note
+
+    assert GUARD_FALLBACKS["role_leakage"] == "Давайте продолжим."
+    note = correction_note([Violation("role_leakage", "user: привет")])
+    assert "«user: привет»" in note and "без ролей" in note
 
 
 def test_screen_records_and_logs_but_check_does_not(caplog):
@@ -252,12 +333,13 @@ def test_a_new_guard_starts_with_nothing_saved():
 def test_every_rule_has_a_fallback_and_a_correction():
     from agent.text_guard import _CORRECTIONS
 
-    rules = {"foreign_script", "phone_digits", "acceptance_claim", "written_down"}
+    rules = {"foreign_script", "role_leakage", "phone_digits", "acceptance_claim", "written_down"}
     assert set(GUARD_FALLBACKS) == rules == set(_CORRECTIONS)
 
 
 def test_the_fallback_wording_is_the_agreed_one():
     assert GUARD_FALLBACKS == {
+        "role_leakage": "Давайте продолжим.",
         "phone_digits": "Хорошо, номер есть.",
         "acceptance_claim": "Давайте ещё раз проверим данные заявки.",
         "written_down": "Хорошо.",

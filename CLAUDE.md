@@ -84,6 +84,15 @@ owner via Telegram. No real calendar integration — the owner confirms manually
 
 ## Status
 
+**STEP 1 (the text agent, roadmap items 1.1–1.10) IS COMPLETE — tag `v0.1-text-agent`.** What exists:
+a Russian-language, audio-agnostic booking agent (DialogueEngine + CallSession + tools + SQLite +
+Telegram notifier + CLI) with code-enforced guarantees (two-step booking, code-built read-back and
+acceptance, `end_call` and same-turn-confirm guards, speech guard) and an evaluation harness
+(`python -m evals`) with a measured baseline: **95/99 = 96%** raw pass rate on 10 runs per scenario
+(old agent 76/95 = 80%). Step 2 (STT/TTS, local mic) has NOT been started. Post-tag follow-ups, both
+done: the `role_leakage` speech-guard rule and two relaxed eval checks (see the end of this
+section). The detailed step log follows.
+
 **Done:** 1.1 (project skeleton, settings), 1.2 (business.yaml schema + loader), 1.3
 (Russian system prompt builder, with a 14-day calendar so "в пятницу" resolves to a real
 date), 1.4 (`LLMClient` + `OpenAICompatibleLLMClient`, offline tests, live check script),
@@ -296,8 +305,8 @@ more runs per scenario (10 runs = 100 calls ≈ $0.30) before believing a 10-poi
 
 **Speech guard (1.10 follow-up, `agent/text_guard.py` + `DialogueEngine`):** deterministic, no
 LLM call, applied to every sentence the MODEL writes before it becomes a `Say` (code-built
-sentences: read-back, acceptance, greeting, session fallbacks are not checked). Rules, in
-order: `foreign_script`; `phone_digits` (a run of more than 4 digits or number words; in a
+sentences: read-back, acceptance, greeting, session fallbacks are not checked). Rules, in order: `foreign_script`; `role_leakage` (a role label such as
+`user:` / «Клиент:» or the caller's words written into the reply); `phone_digits` (a run of more than 4 digits or number words; in a
 sentence about money only a digit group of 7+ counts); `acceptance_claim` («заявка
 принята/передана/отправлена/оформлена», «сообщение передано», «ваша просьба принята», not in a
 question) while nothing has been committed in this call; `written_down` (записал/записала/
@@ -311,8 +320,8 @@ engine asks the model ONCE more with a hidden `system` note that quotes the bloc
 says what to do («заявка НЕ сохранена: если клиент подтвердил, вызови confirm_booking…»; the
 note is for that round only, not kept in the history); if that round is blocked or empty too, a
 neutral fallback is spoken: `GUARD_FALLBACKS` = phone «Хорошо, номер есть.», acceptance
-«Давайте ещё раз проверим данные заявки.», записал «Хорошо.», foreign script «Простите,
-уточните, пожалуйста, ваш вопрос.» (gender-neutral, no digits, never blaming the caller; tests
+«Давайте ещё раз проверим данные заявки.», записал «Хорошо.», role leakage «Давайте
+продолжим.», foreign script «Простите, уточните, пожалуйста, ваш вопрос.» (gender-neutral, no digits, never blaming the caller; tests
 enforce it). A stalled first attempt that is followed by a fully blocked retry goes straight to
 the fallback. Verified live on DeepSeek: the mid-conversation `system` note is accepted and the
 model continues sensibly (next question, or `prepare_booking`). `SPEECH_GUARD=false` is a
@@ -330,6 +339,26 @@ service gets an `other` booking, not «просто передать вопро�
 questions without an answer); and a contradictory old rule was removed («Пиши … номера
 телефонов словами» told the model to spell phone numbers out). New invariant
 `saved_phone_is_the_dictated_number` (10 invariants now).
+
+**Post-tag follow-ups (2026-09-26):** (1) **`role_leakage` guard rule** (checked right after
+`foreign_script`, before `phone_digits`): blocks a sentence that starts with or contains a role
+label: Latin `user` / `assistant` / `system` when they open the sentence, carry a colon, or are glued
+to Cyrillic («userЗаписывай»), and «Клиент:», «Агент:», «Администратор:», «Ассистент:»,
+«Пользователь:», «Система:» with a colon. Ordinary words and Latin brand names («Ecosystem»,
+«Системы безопасности», «Администратор перезвонит») are not touched. Fallback «Давайте продолжим.»
+(neutral, no digits, no blame; covered by the wording tests) and a correction note for the model.
+Tested with the real leaked sentence from the live probe («userЗаписывай на тот, что я продиктовал —
+восемь девять один шесть…»), which is reported as `role_leakage` (not as a phone number). New eval
+invariant `no_role_leakage` (11 invariants); `SPEECH GUARD BLOCKS` has a `role_leakage` column.
+**Replayed over all ~450 recorded runs it found ONE real leak nobody had seen**
+(old agent, service_not_listed #0): «userМеня зовут Дмитрий.», the model invented the caller's answer,
+and a name «Дмитрий» plus a phone number the caller never gave were then SAVED by `take_message`.
+(2) **Two eval checks relaxed:** `other_service_no_price` now allows quoting the price of a LISTED
+alternative («у нас есть оклейка защитной плёнкой, от двадцати тысяч рублей»): every amount must be
+in the price list and no CLAUSE (split on commas/semicolons, not dashes) about the requested item
+(«фар») may carry an amount; `says_master_decides` accepts any wording that the price is not final
+(`FINAL_PRICE_HEDGE`: мастер/осмотр/зависит от/уточн…/определ…/ориентировочн…). Both real runs that
+failed the strict versions in the final sweep now pass.
 
 **Final comparison (2026-09-25, 10 runs per scenario = 100 runs each, run simultaneously so the
 network conditions match; `python -m evals.compare data/evals/final_ref10 data/evals/final_new10`).
@@ -350,7 +379,7 @@ happened, so the corrective round never ran in the sweeps** (it is covered by te
 Warning `own_recap_before_prepare` 39 → 13 per 100 runs (the prompt cut it by two thirds, not to 0).
 Caller side: 3 markers ignored, 11 goodbyes deferred (new); 2 / 9 (ref).
 
-**Next:** step 2 (STT/TTS, local mic): pick the voice (gender!), wire `SpeechGuard` before TTS,
+**Next (NOT started):** step 2 (STT/TTS, local mic): pick the voice (gender!), wire `SpeechGuard` before TTS,
 decide the production LLM/provider order (see the latency issues), and re-run the latency study
 from the production VPS.
 
@@ -479,14 +508,15 @@ real VPS).
   sunday_closed run still saved the caller ID instead of the number the caller dictated
   (`saved_phone_is_the_dictated_number`); it is only checked in evals, nothing enforces it in
   code (idea: when the caller dictated digits, validate `prepare_booking`'s phone against the
-  digits heard, which needs the raw caller text in the tool layer). (5) **Two eval checks are
-  too strict, not the agent:** `other_service_no_price` fires when the agent quotes the price of
-  a LISTED alternative («у нас есть оклейка защитной плёнкой, от двадцати тысяч рублей») before
-  booking `other`, and `says_master_decides` wants the word «мастер» although «точная цена
-  зависит от размера и состояния автомобиля» says the same. (6) The model sometimes writes the
-  CALLER's line in its own reply («userЗаписывай на тот, что я продиктовал — восемь девять
-  один шесть…», seen in a live probe): role leakage, currently caught only if it trips a
-  guard rule. (7) `acceptance_claim` never fired in the 200 runs of the final comparison
+  digits heard, which needs the raw caller text in the tool layer). (5) **Two eval checks were too strict (fixed 2026-09-26, see the follow-ups).**
+  (6) **Role leakage is now blocked in speech, but NOT in tool calls:** when the model writes the
+  caller's line into its reply («userМеня зовут Дмитрий.») it has usually built the rest of that
+  reply, including tool calls, on invented data; in the recorded case a fabricated name and phone
+  were saved through `take_message`. The guard drops the sentence, yet a tool call in the same
+  reply still runs. Proposed, NOT done: on `role_leakage` also discard that round's tool calls and
+  run the corrective round (a design change: needs approval). More generally, nothing checks that
+  `name` / `phone` in `prepare_booking` / `take_message` were actually said by the caller.
+  (7) `acceptance_claim` never fired in the 200 runs of the final comparison
   (it happened once in ~250 earlier): rare but the guard covers it.
 - **Infra noise under load:** the final comparison ran both sweeps at once (6 concurrent agent
   streams): 19 of 488 Together requests (3.9%) and 17 of 509 (3.3%) had a first token later than

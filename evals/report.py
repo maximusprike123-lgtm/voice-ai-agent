@@ -186,7 +186,13 @@ def format_report(graded: list[Graded], order: list[str]) -> str:
     return "\n".join(lines)
 
 
-GUARD_RULES = ("phone_digits", "acceptance_claim", "written_down", "foreign_script")
+GUARD_RULES = (
+    "phone_digits",
+    "acceptance_claim",
+    "written_down",
+    "foreign_script",
+    "role_leakage",
+)
 
 
 def guard_block_counts(graded: list[Graded]) -> dict[str, dict[str, int]]:

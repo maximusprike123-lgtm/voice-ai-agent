@@ -153,7 +153,7 @@ SCENARIOS: tuple[Scenario, ...] = (
             c.no_messages(),
             c.service_in(["other", "ppf"]),
             c.other_service_notes_match(r"фар"),
-            c.other_service_has_no_price(),
+            c.other_service_has_no_price(r"фар"),
             c.time_empty(),
             c.phone_is(PHONE_SAVED),
             c.agent_ended_call(),
@@ -198,7 +198,7 @@ SCENARIOS: tuple[Scenario, ...] = (
             c.no_bookings(),
             c.no_messages(),
             c.quotes_amount(25000),
-            c.speech_matches("says_master_decides", r"мастер|осмотр"),
+            c.speech_matches("says_master_decides", c.FINAL_PRICE_HEDGE),
         ),
     ),
     Scenario(

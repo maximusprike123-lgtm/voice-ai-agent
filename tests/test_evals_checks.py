@@ -238,7 +238,7 @@ def test_a_crashing_check_counts_as_a_failure_with_its_name():
 
 def test_every_invariant_is_named_and_unique():
     names = [inv.check_name for inv in c.INVARIANTS]
-    assert len(names) == len(set(names)) == len(c.INVARIANT_NAMES) == 10
+    assert len(names) == len(set(names)) == len(c.INVARIANT_NAMES) == 11
 
 
 # --- Scenario check factories ---------------------------------------------------------------------
@@ -322,7 +322,7 @@ def test_no_terms_invented():
 
 def test_other_service_rules_apply_only_to_other_bookings():
     listed = make_run([say(1, "От пятнадцати тысяч рублей.")], [booking()])
-    assert ok(c.other_service_has_no_price(), listed) and ok(
+    assert ok(c.other_service_has_no_price(r"фар"), listed) and ok(
         c.other_service_notes_match("фар"), listed
     )
 
@@ -331,8 +331,106 @@ def test_other_service_rules_apply_only_to_other_bookings():
     assert not ok(
         c.other_service_notes_match("фар"), make_run([], [booking(service_id="other", notes="х")])
     )
-    priced = make_run([say(1, "Это будет стоить около десяти тысяч рублей.")], [other])
-    assert not ok(c.other_service_has_no_price(), priced)
+
+
+# The price check for an «other» booking: a listed alternative may be quoted, the unlisted item
+# may not be priced, and no amount may be invented.
+LISTED_ALTERNATIVE = (
+    "Такой услуги в нашем списке нет — у нас есть оклейка защитной плёнкой, "
+    "от двадцати тысяч рублей."
+)
+
+
+@pytest.mark.parametrize(
+    ("sentence", "passes"),
+    [
+        (LISTED_ALTERNATIVE, True),  # the sentence that failed the old strict check in a real run
+        ("Такой услуги нет, есть оклейка кузова полиуретановой плёнкой.", True),  # no amount at all
+        ("Точную цену оклейки фар определит мастер.", True),
+        ("Оклейка фар цветной плёнкой стоит от двадцати тысяч рублей.", False),  # priced the item
+        ("Фары мы оклеим за пятнадцать тысяч рублей.", False),
+        ("Это будет стоить около двенадцати тысяч рублей.", False),  # not in the price list
+        ("Оклейка защитной плёнкой — от 20 000 ₽, а фары уточнит мастер.", True),  # other clause
+        ("Оклейка фар — от двадцати тысяч рублей.", False),  # a dash does not separate the item
+        ("Фары уточнит мастер, а защитная плёнка стоит от 20 000 ₽.", True),
+    ],
+)
+def test_other_service_price_check(sentence, passes):
+    run = make_run([say(1, sentence)], [booking(service_id="other", notes="оклейка фар")])
+    assert ok(c.other_service_has_no_price(r"фар"), run) is passes
+
+
+def test_the_other_service_price_check_without_an_item_pattern_only_rejects_invented_amounts():
+    other = [booking(service_id="other", notes="х")]
+    assert ok(c.other_service_has_no_price(), make_run([say(1, LISTED_ALTERNATIVE)], other))
+    invented = make_run([say(1, "Это стоит двенадцать тысяч рублей.")], other)
+    assert not ok(c.other_service_has_no_price(), invented)
+
+
+def test_the_other_service_price_check_ignores_bookings_of_listed_services():
+    run = make_run([say(1, "Фары стоят двенадцать тысяч рублей.")], [booking()])
+    assert ok(c.other_service_has_no_price(r"фар"), run)
+
+
+def test_service_not_listed_uses_the_relaxed_price_check():
+    scenario = BY_ID["service_not_listed"]
+    run = ideal("service_not_listed")
+    run.items.append(say(1, LISTED_ALTERNATIVE))
+    assert [r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed] == []
+
+
+# --- says_master_decides in price_only ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sentence", "passes"),
+    [
+        ("Точную стоимость определит мастер после осмотра.", True),
+        ("Точная цена зависит от размера и состояния автомобиля.", True),  # the real failing run
+        ("Окончательная цена зависит от осмотра.", True),
+        ("Итоговую стоимость уточнит администратор.", True),
+        ("Это ориентировочная цена.", True),
+        ("Керамическое покрытие стоит от двадцати пяти тысяч рублей.", False),  # no hedge at all
+        ("Работы занимают от двух до трёх дней.", False),
+    ],
+)
+def test_price_only_accepts_any_wording_that_says_the_price_is_not_final(sentence, passes):
+    check = c.speech_matches("says_master_decides", c.FINAL_PRICE_HEDGE)
+    assert ok(check, make_run([say(1, sentence)])) is passes
+
+
+def test_the_real_price_only_answer_that_failed_before_now_passes():
+    scenario = BY_ID["price_only"]
+    run = make_run(
+        [
+            say(0, "Здравствуйте!"),
+            say(
+                1,
+                "Керамическое покрытие стоит от двадцати пяти тысяч рублей, "
+                "точная цена зависит от размера и состояния автомобиля.",
+            ),
+            say(1, "Работы занимают от двух до трёх дней."),
+            say(2, "До свидания!"),
+        ]
+    )
+    assert [r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed] == []
+
+
+# --- The role-leakage invariant -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sentence", "passes"),
+    [
+        ("userЗаписывай на тот, что я продиктовал.", False),
+        ("Assistant: Здравствуйте!", False),
+        ("Клиент: Игорь.", False),
+        ("Здравствуйте! Чем могу помочь?", True),
+        ("Системы сигнализации мы не устанавливаем.", True),
+    ],
+)
+def test_no_role_leakage_invariant(sentence, passes):
+    assert ok(c.no_role_leakage, make_run([say(1, sentence)])) is passes
 
 
 def test_closed_day_checks():
