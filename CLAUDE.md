@@ -53,27 +53,50 @@ owner via Telegram. No real calendar integration — the owner confirms manually
 
 **Done:** 1.1 (project skeleton, settings), 1.2 (business.yaml schema + loader), 1.3
 (Russian system prompt builder, with a 14-day calendar so "в пятницу" resolves to a real
-date), 1.4 (`LLMClient` + `OpenAICompatibleLLMClient`, offline tests, live check script).
+date), 1.4 (`LLMClient` + `OpenAICompatibleLLMClient`, offline tests, live check script),
+1.5 (`DialogueEngine` in `src/agent/dialogue.py`: history, LLM→tools→LLM loop capped at 5
+rounds, `SentenceSplitter`, `Say`/`ToolResult`/`EndCall` events, cancellable; tools come in
+through a `ToolExecutor` protocol that 1.6 implements; `scripts/measure_ttft.py` times the
+real prompt through the engine). `mark_spoken` (trim history to what the caller heard) is
+deferred to step 3. Follow-up: `build_system_prompt()` now puts all static content first and
+the per-call content (time, caller number, 14-day calendar) last, after `VOLATILE_MARKER`;
+a test pins the shared prefix. Tool schemas (1.6) must stay static too: no dates, caller data
+or other per-call content in tool names/descriptions/parameters.
 
-**Next: 1.5 — DialogueEngine.** Holds message history, drives the LLM-then-tools-then-LLM
-loop, splits streamed text into sentences (the units TTS will speak later), emits
-`Say`/`ToolResult`/`EndCall` events. Must be cancellable (for barge-in later, step 3).
+**Next: 1.6 — tools** (`submit_booking`, `take_message`, `end_call`) implementing
+`ToolExecutor`.
 
-**Remaining roadmap (from the original plan):** 1.6 tools (`submit_booking`,
-`take_message`, `end_call`) · 1.7 SQLite storage · 1.8 Telegram notifier · 1.9 CLI ·
+**Remaining roadmap (from the original plan):** 1.7 SQLite storage · 1.8 Telegram notifier · 1.9 CLI ·
 1.10 tests incl. scripted scenario dialogues against the real LLM. Then step 2 (STT/TTS,
 local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 
 ## Known open issues
 
-- **Ollama cold start:** ~4.4s time-to-first-token when the model isn't already loaded in
-  memory (Ollama unloads idle models after a few minutes); ~1.0s once warm. Needs a
-  decision later (`OLLAMA_KEEP_ALIVE`, a keep-warm ping, or accept it for a low-volume
-  pilot) — not fixed yet.
-- **TTFT hasn't been measured with the real system prompt yet.** `check_llm.py` uses a
-  short ad-hoc prompt; `build_system_prompt()` (step 1.3) is much longer (business data +
-  14-day calendar) and will add prompt-processing time on this CPU-only 8GB Mac. Re-measure
-  once DialogueEngine (1.5) wires the real prompt in.
+- **Latency on qwen3.5:4b / 8GB CPU-only Mac is far over budget with the real prompt**
+  (measured with `scripts/measure_ttft.py`; prompt ≈ 2100 tokens incl. tool schemas;
+  single run, numbers are noisy). Time to first *sentence* (what TTS waits for):
+  cold ≈ 27s · warm with a changed prompt ≈ 13s (prefill ≈ 165 tok/s, no KV-cache reuse) ·
+  warm with an identical prompt 1.6–5.5s (inconsistent, unexplained) · later turns of the
+  same conversation 1.9–2.7s. Generation is only ≈ 10 tok/s, so the first sentence lands
+  ~1–1.3s after the first token. Budget is 1.5s.
+- **Prompt-prefix reuse does not work on Ollama + qwen3.5:4b, so the prompt reorder did not
+  help here.** Before/after `measure_ttft.py` (new call = changed time + caller): first
+  sentence median 15.5s → 14.6s, i.e. no real change. Probe (Ollama `/api/chat`, ~2100-token
+  prompt): identical repeat 0.12s · same system prompt, different user text 3.3s · system prompt
+  differing only in its last section 12.8s · fully cold 12s. So the runner only resumes from
+  (near) the end of the previous request, never from an arbitrary shared prefix. Hypothesis
+  (unverified): qwen3.5 is a hybrid/recurrent-state model and can't rewind its state to a
+  mid-prompt point. The static-first layout stays: it is free and helps backends with real
+  prefix caching (vLLM, hosted APIs, attention-only models on llama.cpp). Re-measure on the
+  production backend; that choice (and the cold-start / `OLLAMA_KEEP_ALIVE` question) is
+  deliberately deferred until before step 2, since latency on the 8 GB dev Mac isn't
+  representative.
+- **Small Qwen models sometimes insert Chinese characters** (seen once: "тридцати五千
+  рублей"). Step 1.10 scenario tests must check replies for non-Cyrillic/Latin scripts, and a
+  guard is needed before TTS.
+- **Empty model reply:** seen once in a real run (turn 2 of a conversation): the LLM returned
+  no text and no tool call, so `DialogueEngine.respond()` yields no events and the caller
+  would hear silence. Decide handling (retry / fallback phrase) in 1.9 or 1.10.
 
 ## Commands
 
@@ -83,4 +106,5 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 .venv/bin/ruff format .              # format
 .venv/bin/python scripts/check_llm.py   # live check against the real LLM_BASE_URL in .env:
                                           # thinking disabled? tool calls parse? TTFT?
+.venv/bin/python scripts/measure_ttft.py  # real prompt through DialogueEngine: cold/warm TTFT
 ```

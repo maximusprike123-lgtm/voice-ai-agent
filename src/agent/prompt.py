@@ -6,6 +6,12 @@ from agent.business import BusinessConfig, DayHours, Service, Weekday
 
 CALENDAR_DAYS = 14
 
+# Everything from this heading on changes per call (time, caller, calendar); everything before
+# it depends only on the business config. Backends that cache the processed prompt prefix
+# (e.g. Ollama's KV cache) can reuse the static part between calls only if it stays a
+# byte-identical prefix, so keep anything volatile below the marker.
+VOLATILE_MARKER = "# Текущее время"
+
 WEEKDAYS_RU = (
     "понедельник",
     "вторник",
@@ -90,7 +96,11 @@ def _faq_section(business: BusinessConfig) -> str:
 def build_system_prompt(
     business: BusinessConfig, now: datetime, caller_phone: str | None = None
 ) -> str:
-    """Build the system prompt. `now` must be timezone-aware, in the business time zone."""
+    """Build the system prompt. `now` must be timezone-aware, in the business time zone.
+
+    Static content (persona, company data, rules) comes first and per-call content (time, caller
+    number, calendar) last, after VOLATILE_MARKER, to keep the prefix cacheable.
+    """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
 
@@ -102,13 +112,6 @@ def build_system_prompt(
 Ты — голосовой администратор компании {business.name} (детейлинг автомобилей, Москва). \
 Ты отвечаешь на входящие телефонные звонки на русском языке. Твои ответы будут озвучены \
 синтезатором речи, собеседник тебя слышит, а не читает.
-
-# Текущее время
-Сейчас {format_date_ru(today)}, {now:%H:%M} (время компании).
-Номер звонящего: {caller}.
-
-# Календарь на ближайшие {CALENDAR_DAYS} дней (дата — день недели: часы работы)
-{_calendar_section(business, today)}
 
 # О компании
 Адрес: {business.address}
@@ -144,7 +147,7 @@ def build_system_prompt(
 3. Марку и модель автомобиля.
 4. Услугу (из списка выше).
 5. Желаемую дату и время. Пересчитывай слова «завтра», «в пятницу» и подобные в дату \
-по календарю выше. Время должно попадать в часы работы этого дня.
+по календарю в конце этого сообщения. Время должно попадать в часы работы этого дня.
 Когда всё собрано, кратко повтори данные заявки и спроси, всё ли верно. Только после \
 подтверждения вызови инструмент submit_booking. После успешной отправки скажи, что \
 администратор перезвонит для подтверждения записи. Никогда не говори, что запись \
@@ -153,4 +156,11 @@ def build_system_prompt(
 # Завершение звонка
 Когда собеседник прощается или разговор окончен, попрощайся одной фразой и вызови \
 инструмент end_call.
+
+{VOLATILE_MARKER}
+Сейчас {format_date_ru(today)}, {now:%H:%M} (время компании).
+Номер звонящего: {caller}.
+
+# Календарь на ближайшие {CALENDAR_DAYS} дней (дата — день недели: часы работы)
+{_calendar_section(business, today)}
 """

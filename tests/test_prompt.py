@@ -1,3 +1,4 @@
+import os.path
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -5,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from agent.business import load_business_config
-from agent.prompt import build_system_prompt, format_date_ru, format_price
+from agent.prompt import VOLATILE_MARKER, build_system_prompt, format_date_ru, format_price
 
 REPO_CONFIG = Path(__file__).parent.parent / "config" / "business.yaml"
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -68,6 +69,40 @@ def test_prompt_names_the_tools(business):
 def test_prompt_includes_extra_rules(business):
     custom = business.model_copy(update={"extra_rules": ["Не обсуждай конкурентов."]})
     assert "- Не обсуждай конкурентов." in build_system_prompt(custom, NOW)
+
+
+def test_static_prefix_is_identical_across_times_and_callers(business):
+    """The prompt prefix must not depend on the call, so a prompt cache can reuse it."""
+    prompts = [
+        build_system_prompt(business, NOW, "+79161234567"),
+        build_system_prompt(business, NOW),
+        build_system_prompt(business, datetime(2026, 10, 3, 9, 41, tzinfo=MOSCOW), "+79990001122"),
+        build_system_prompt(business, datetime(2027, 1, 1, 0, 0, tzinfo=MOSCOW), "+74951112233"),
+    ]
+    assert all(p.count(VOLATILE_MARKER) == 1 for p in prompts)
+
+    static_parts = [p.split(VOLATILE_MARKER)[0] for p in prompts]
+    assert len(set(static_parts)) == 1
+    assert len(set(prompts)) == len(prompts)  # ...while the full prompts do differ
+
+    # The property that matters: the byte-identical shared prefix covers the whole static part.
+    static = static_parts[0]
+    assert len(os.path.commonprefix(prompts)) >= len(static)
+
+
+def test_static_part_holds_all_business_knowledge_and_nothing_per_call(business):
+    prompt = build_system_prompt(business, NOW, "+79161234567")
+    static, volatile = prompt.split(VOLATILE_MARKER)
+
+    assert static.startswith("Ты — голосовой администратор")
+    for expected in (business.name, business.address, "# Услуги и цены", "# Частые вопросы"):
+        assert expected in static
+    for tool in ("submit_booking", "take_message", "end_call"):
+        assert tool in static
+    for per_call in ("Сейчас", "Номер звонящего", "Календарь", "+79161234567", "2026-09-24"):
+        assert per_call not in static
+    for per_call in ("17:05", "+79161234567", "2026-09-24", "Календарь"):
+        assert per_call in volatile
 
 
 def test_naive_datetime_is_rejected(business):
