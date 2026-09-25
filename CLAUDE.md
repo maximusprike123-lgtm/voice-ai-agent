@@ -63,6 +63,8 @@ owner via Telegram. No real calendar integration — the owner confirms manually
   the system prompt. No RAG — the FAQ is small and fixed.
 - **Bookings:** validated, then **written to SQLite before** the Telegram notification is
   sent, so nothing is lost if Telegram fails. The agent never confirms a time slot itself.
+  SQLite is also the outbox: every row has `notified_at` (NULL until the owner was told), so
+  after a crash between save and Telegram the notifier re-sends whatever is still NULL.
 - **Scope:** inbound calls only, Russian only, no call transfer, no LangVerse code reused.
 
 ## Status
@@ -109,15 +111,31 @@ caller ID it asks the caller to dictate a number), approximate period → `prefe
 don't re-ask the time. `scripts/live_booking_dialogue.py` runs a scripted caller against the
 real LLM.
 
+1.7 (SQLite, `src/agent/storage.py`): `SqliteSink` implements `RecordSink` on stdlib
+`sqlite3` (one shared connection, every call in `asyncio.to_thread` under a lock); WAL +
+`synchronous=FULL`, so once `add_*` returns the row is on disk; file mode 0600 (dir 0700,
+loose modes on an existing file are tightened); `PRAGMA user_version` + an append-only
+`_MIGRATIONS` tuple (a newer-than-known database is refused, untouched; step 3 adds `call_id`
+as migration 2). Tables `bookings` and `messages` with a nullable `notified_at` outbox
+column. `RecordSink.add_booking/add_message` now return the row id (per-table ids;
+`InMemorySink` too). API: `SqliteSink.open(path)` / `close()` / `async with`, `get_booking`,
+`list_bookings`, `list_messages`, `list_unnotified()` (merged, oldest first),
+`mark_booking_notified(id)` / `mark_message_notified(id)` (idempotent, keeps the first
+timestamp). Failures raise `StorageError`; the tools already turn that into an apology plus
+`ОШИБКА` and keep the draft so `confirm_booking` can be retried. `Settings.db_path` exists
+(`data/agent.db`, gitignored) but nothing opens the database yet: the CLI (1.9) / call
+handler (step 3) will.
+
 Backend switch (after 1.6): main LLM is now OpenRouter DeepSeek (see Architecture);
 `check_llm.py` gained the token-based "no hidden reasoning" check (it fails if
 `reasoning_tokens > 0` or a one-word answer costs > 20 completion tokens; verified to FAIL with
 `LLM_REASONING_EFFORT=high`); `measure_ttft.py` skips its Ollama-only cold-start run on
 remote backends.
 
-**Next: 1.7 — SQLite storage** (a `RecordSink` that writes before anything is notified).
+**Next: 1.8 — Telegram notifier:** wraps `SqliteSink`: save first, then notify, then
+`mark_*_notified`; a startup/periodic retry of `list_unnotified()`.
 
-**Remaining roadmap (from the original plan):** 1.8 Telegram notifier · 1.9 CLI ·
+**Remaining roadmap (from the original plan):** 1.9 CLI ·
 1.10 tests incl. scripted scenario dialogues against the real LLM. Then step 2 (STT/TTS,
 local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 

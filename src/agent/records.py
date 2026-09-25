@@ -34,22 +34,27 @@ class CallbackMessage:
 
 
 class RecordSink(Protocol):
-    async def add_booking(self, booking: Booking) -> None:
-        """Persist/forward a booking. Raise on failure so the tool can tell the model."""
+    """Where finished records go. Both methods return the id of the stored record (ids are
+    per record type) and raise on failure, so the tool can tell the model."""
+
+    async def add_booking(self, booking: Booking) -> int:
+        """Persist a booking. Once this returns, the record must not be lost."""
         ...
 
-    async def add_message(self, message: CallbackMessage) -> None: ...
+    async def add_message(self, message: CallbackMessage) -> int: ...
 
 
 @dataclass
 class InMemorySink:
-    """Keeps everything in lists. For tests, the CLI and live checks until step 1.7."""
+    """Keeps everything in lists. For tests and live checks that must not touch a database."""
 
     bookings: list[Booking] = field(default_factory=list)
     messages: list[CallbackMessage] = field(default_factory=list)
 
-    async def add_booking(self, booking: Booking) -> None:
+    async def add_booking(self, booking: Booking) -> int:
         self.bookings.append(booking)
+        return len(self.bookings)
 
-    async def add_message(self, message: CallbackMessage) -> None:
+    async def add_message(self, message: CallbackMessage) -> int:
         self.messages.append(message)
+        return len(self.messages)
