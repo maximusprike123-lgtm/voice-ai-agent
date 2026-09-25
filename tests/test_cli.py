@@ -538,3 +538,11 @@ def test_parser_accepts_every_documented_option(tmp_path):
         ]
     )
     assert namespace.notify and namespace.show_tools and namespace.caller == "+79991234567"
+
+
+async def test_the_cli_shows_what_the_speech_guard_blocked_and_speaks_the_rest(tmp_path):
+    out, _ = await call_cli(tmp_path, ["Хочу записаться"], text("Хорошо, записал. Как вас зовут?"))
+
+    assert "  [guard] blocked (written_down): Хорошо, записал." in out
+    assert "АГЕНТ: Как вас зовут?" in out
+    assert "АГЕНТ: Хорошо, записал." not in out

@@ -244,3 +244,17 @@ def test_offset_clock_starts_at_the_requested_time_and_keeps_ticking():
 
     real["now"] += timedelta(minutes=7)
     assert clock() == NOW + timedelta(minutes=7)
+
+
+async def test_the_speech_guard_setting_reaches_the_engine(tmp_path):
+    async with open_runtime(make_settings(tmp_path), llm=ScriptedLLM()) as runtime:
+        assert runtime.new_call()._engine.guard is not None
+    async with open_runtime(make_settings(tmp_path, speech_guard=False), llm=ScriptedLLM()) as rt:
+        assert rt.new_call()._engine.guard is None
+
+
+async def test_each_call_gets_its_own_guard_state(tmp_path):
+    async with open_runtime(make_settings(tmp_path), llm=ScriptedLLM()) as runtime:
+        first, second = runtime.new_call()._engine, runtime.new_call()._engine
+        first.guard.note_commit()
+        assert first.guard.committed and not second.guard.committed

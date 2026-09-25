@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent.app import open_runtime
-from agent.dialogue import EndCall, Say, ToolResult
+from agent.dialogue import EndCall, Say, SentenceBlocked, ToolResult
 from agent.llm import LLMClient
 from agent.session import TurnFailed
 from agent.settings import Settings
@@ -64,6 +64,10 @@ async def run_once(
                                 said.append(event.text)
                             elif isinstance(event, ToolResult):
                                 items.append(_tool_item(turn, event))
+                            elif isinstance(event, SentenceBlocked):
+                                items.append(
+                                    Item(turn, "blocked", text=event.text, rule=event.rule)
+                                )
                             elif isinstance(event, TurnFailed):
                                 items.append(Item(turn, "failed", text=event.reason))
                                 outcome, detail = "infra_error", event.reason

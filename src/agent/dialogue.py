@@ -4,6 +4,12 @@ Text in (what the caller said), events out (what to say, which tools ran, when t
 It knows nothing about audio, STT/TTS, or which LLM vendor is behind `LLMClient`, so the same
 engine runs in a CLI, with a local mic, and on real phone calls.
 
+Speech guard: every sentence the MODEL writes is checked (agent.text_guard) before it becomes
+a Say. A blocked sentence is dropped (SentenceBlocked is emitted instead) and never enters the
+history as spoken text. Only if that leaves the whole reply silent (no sentence, no tool call)
+is the model asked once more with a hidden correction note; if that fails too, a neutral
+fallback sentence is spoken. Sentences written by code (ToolOutcome.say) are not checked.
+
 Cancellation (barge-in): `respond()` is an async generator. Cancelling the task that consumes
 it, or calling `aclose()` on it, stops the LLM stream and leaves the history consistent (no
 tool call without a result). Sentences already emitted stay in the history as the assistant's
@@ -28,6 +34,7 @@ from agent.llm import (
     ToolCallEvent,
     ToolSpec,
 )
+from agent.text_guard import SpeechGuard, Violation, correction_note, fallback_sentence
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +85,15 @@ class EndCall:
     """The agent is done: say goodbye (already emitted as Say) and hang up."""
 
 
-DialogueEvent = Say | ToolResult | EndCall
+@dataclass(frozen=True)
+class SentenceBlocked:
+    """Not spoken: the speech guard stopped a sentence the model wrote (rule = which check)."""
+
+    rule: str
+    text: str
+
+
+DialogueEvent = Say | ToolResult | EndCall | SentenceBlocked
 
 
 # --- Tools (implemented in step 1.6) ----------------------------------------------------------
@@ -171,17 +186,27 @@ class DialogueEngine:
         *,
         first_event_timeout: float = DEFAULT_FIRST_EVENT_TIMEOUT,
         event_timeout: float = DEFAULT_EVENT_TIMEOUT,
+        speech_guard: bool = True,
     ) -> None:
         self._llm = llm
         self._tools = tools
         self._first_event_timeout = first_event_timeout
         self._event_timeout = event_timeout
+        self._guard: SpeechGuard | None = SpeechGuard() if speech_guard else None
         self._messages: list[Message] = [Message(Role.SYSTEM, system_prompt)]
 
     @property
     def messages(self) -> list[Message]:
         """A copy of the conversation history, system prompt first."""
         return list(self._messages)
+
+    @property
+    def guard(self) -> SpeechGuard | None:
+        """The call's speech guard (None if disabled): what it blocked so far, in `.blocked`."""
+        return self._guard
+
+    def _screen(self, sentence: str) -> Violation | None:
+        return self._guard.screen(sentence) if self._guard is not None else None
 
     def add_assistant_message(self, text: str) -> None:
         """Record something the agent said outside the LLM (the greeting), so the model knows."""
@@ -203,17 +228,21 @@ class DialogueEngine:
         self._messages.append(Message(Role.USER, user_text))
 
         for round_index in range(MAX_LLM_ROUNDS):
+            correction: Message | None = None  # hidden note for a corrective round; not kept
+            first_blocked: list[Violation] = []
             for attempt in (1, 2):
                 spoken: list[str] = []
                 calls: list[ToolCall] = []
+                blocked: list[Violation] = []
                 splitter = SentenceSplitter()
                 specs = self._tools.specs or None
                 started = False  # did the LLM send anything at all?
                 failure: LLMError | None = None
                 retryable = True
+                messages = self._messages if correction is None else [*self._messages, correction]
 
                 try:
-                    async with aclosing(self._llm.stream(self._messages, specs)) as stream:
+                    async with aclosing(self._llm.stream(messages, specs)) as stream:
                         events = aiter(stream)
                         while True:
                             timeout = self._event_timeout if started else self._first_event_timeout
@@ -231,15 +260,36 @@ class DialogueEngine:
                             started = True
                             if isinstance(event, TextDelta):
                                 for sentence in splitter.feed(event.text):
-                                    spoken.append(sentence)
-                                    yield Say(sentence)
+                                    if violation := self._screen(sentence):
+                                        blocked.append(violation)
+                                        yield SentenceBlocked(violation.rule, sentence)
+                                    else:
+                                        spoken.append(sentence)
+                                        yield Say(sentence)
                             elif isinstance(event, ToolCallEvent):
                                 calls.append(event.call)
                         if tail := splitter.flush():
-                            spoken.append(tail)
-                            yield Say(tail)
+                            if violation := self._screen(tail):
+                                blocked.append(violation)
+                                yield SentenceBlocked(violation.rule, tail)
+                            else:
+                                spoken.append(tail)
+                                yield Say(tail)
                     if not spoken and not calls:
-                        failure = LLMError("the LLM returned an empty reply")
+                        violations = blocked or first_blocked
+                        if not violations:
+                            failure = LLMError("the LLM returned an empty reply")
+                        elif attempt == 1:
+                            # Everything the model said was blocked: the caller would hear
+                            # silence. Ask once more, telling the model what was wrong.
+                            first_blocked = blocked
+                            correction = Message(Role.SYSTEM, correction_note(blocked))
+                            logger.warning("whole reply blocked by the speech guard; asking again")
+                            continue
+                        else:
+                            fallback = fallback_sentence(violations)
+                            spoken.append(fallback)
+                            yield Say(fallback)
                 except LLMError as exc:
                     failure = exc
                 except (asyncio.CancelledError, GeneratorExit):
@@ -273,6 +323,8 @@ class DialogueEngine:
             try:
                 for call in calls:
                     outcome = await self._execute(call)
+                    if outcome.committed and self._guard is not None:
+                        self._guard.note_commit()  # acceptance claims are true from now on
                     self._messages.append(Message(Role.TOOL, outcome.result, tool_call_id=call.id))
                     done += 1
                     ends_call = ends_call or outcome.ends_call

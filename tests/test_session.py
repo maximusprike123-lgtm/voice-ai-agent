@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from agent.dialogue import DialogueEngine, EndCall, Say, ToolOutcome, ToolResult
+from agent.dialogue import DialogueEngine, EndCall, Say, SentenceBlocked, ToolOutcome, ToolResult
 from agent.llm import LLMError, Message, Role, StreamEnd, TextDelta, ToolCall, ToolCallEvent
 from agent.records import InMemorySink
 from agent.session import (
@@ -16,6 +16,7 @@ from agent.session import (
     CallSession,
     TurnFailed,
 )
+from agent.text_guard import GUARD_FALLBACKS
 
 NOW = datetime(2026, 9, 24, 17, 5, tzinfo=ZoneInfo("Europe/Moscow"))
 GREETING = "Здравствуйте! Детейлинг-центр «Пример». Чем могу помочь?"
@@ -367,7 +368,21 @@ def test_fallback_phrases_use_masculine_forms_to_be_matched_with_the_tts_voice()
     assert "не расслышал" in ASK_TO_REPEAT
 
 
-@pytest.mark.parametrize("phrase", [ASK_TO_REPEAT, FINAL_APOLOGY, COMMITTED_FALLBACK])
+@pytest.mark.parametrize(
+    "phrase", [ASK_TO_REPEAT, FINAL_APOLOGY, COMMITTED_FALLBACK, *GUARD_FALLBACKS.values()]
+)
 def test_fallback_phrases_have_no_digits_and_no_markup(phrase):
     assert not any(ch.isdigit() for ch in phrase)
     assert not any(ch in phrase for ch in "*_#<>")
+
+
+# --- Speech guard events pass through the session -------------------------------------------------
+
+
+async def test_blocked_sentences_reach_the_front_end_and_are_not_a_failed_turn():
+    session, _, _, _ = make_session(text("Хорошо, записал. Как вас зовут?"))
+
+    events = await turn(session, "Хочу записаться")
+
+    assert events == [SentenceBlocked("written_down", "Хорошо, записал."), Say("Как вас зовут?")]
+    assert not session.ended

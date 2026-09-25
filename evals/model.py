@@ -13,12 +13,13 @@ class Item:
     """One thing that happened in a call, in order."""
 
     turn: int  # 0 = the greeting, 1.. = the caller's utterances
-    kind: str  # "say" | "tool" | "failed" | "end"
+    kind: str  # "say" | "tool" | "failed" | "end" | "blocked"
     text: str = ""  # say: the sentence; tool: its result; failed: the reason
     tool: str = ""
     args: dict = field(default_factory=dict)
     committed: bool = False
     is_error: bool = False
+    rule: str = ""  # for "blocked": which speech-guard rule stopped the sentence
 
 
 @dataclass
@@ -45,6 +46,10 @@ class RunResult:
     def speech(self) -> str:
         """Everything the agent said, sentences joined by a space."""
         return " ".join(i.text for i in self.says())
+
+    def blocked(self) -> list[Item]:
+        """Sentences the speech guard stopped (written by the model, never heard by the caller)."""
+        return [i for i in self.items if i.kind == "blocked"]
 
     def tool_calls(self, name: str | None = None) -> list[Item]:
         return [i for i in self.items if i.kind == "tool" and (name is None or i.tool == name)]

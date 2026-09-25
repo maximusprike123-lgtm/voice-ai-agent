@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # start is retried once, so the caller waits at most about 2 x the first-event timeout.
     llm_first_event_timeout_seconds: float = Field(default=4.0, gt=0)
     llm_event_timeout_seconds: float = Field(default=8.0, gt=0)
+    # Kill switch for the speech guard (agent.text_guard): on by default. Turning it off lets
+    # the model's sentences through unchecked; it exists for debugging, not for production.
+    speech_guard: bool = True
 
     telegram_bot_token: SecretStr = Field(min_length=1)
     telegram_chat_id: str = Field(min_length=1)

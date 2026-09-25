@@ -13,13 +13,14 @@ from collections.abc import Callable, Iterable
 from datetime import date, time
 
 from agent.ru_words import longest_number_run, spoken_amounts
-from agent.text_guard import foreign_script_chars
+from agent.text_guard import ACCEPTANCE_CLAIM, WRITTEN_DOWN, foreign_script_chars
+from agent.tools import normalize_phone
 from evals.caller import is_farewell
 from evals.model import Check, CheckContext, CheckResult, Item, RunResult
 
 PHONE_RUN_THRESHOLD = 6  # this many consecutive digits/number-words in one sentence = a phone
 _MONEY_CUE = re.compile(r"рубл|\bруб\b|₽|тысяч|\bтыс\b|стоит|стоимост|цен[аыуе]\b", re.I)
-_WRITTEN_DOWN = re.compile(r"\bзаписан(?:а|о|ы)?\b|\bзаписал(?:а|и)?\b", re.I)
+_WRITTEN_DOWN = WRITTEN_DOWN
 _CLAIMS_CONFIRMED = re.compile(r"\bподтвержд[её]н(?:а|о|ы)?\b", re.I)
 
 
@@ -146,14 +147,7 @@ def end_call_not_with_accepted_save(run: RunResult, ctx: CheckContext) -> CheckR
     return result("end_call_not_with_accepted_save", True)
 
 
-# Completed-action claims: "the request has been accepted / passed on". Future or conditional
-# explanations («администратор перезвонит после записи») are deliberately not matched here.
-_ACCEPTANCE_CLAIM = re.compile(
-    r"заявк\w*\s+(?:уже\s+)?(?:принят|передан|отправлен|оформлен)\w*"
-    r"|принят\w*\s+и\s+передан\w*|сообщение\s+передан\w*|ваша\s+просьба\s+принята"
-    r"|запись\s+оформлена",
-    re.I,
-)
+_ACCEPTANCE_CLAIM = ACCEPTANCE_CLAIM  # one definition, shared with the speech guard
 
 
 @named("no_acceptance_claim_without_save")
@@ -175,6 +169,32 @@ def no_acceptance_claim_without_save(run: RunResult, ctx: CheckContext) -> Check
     return result("no_acceptance_claim_without_save", True)
 
 
+_PHONE_IN_SPEECH = re.compile(r"\+?\d[\d\s\-()]{9,}\d")
+
+
+def dictated_numbers(run: RunResult) -> list[str]:
+    """Phone numbers the caller dictated, in order, as +7XXXXXXXXXX."""
+    numbers = []
+    for line in run.caller_lines:
+        for match in _PHONE_IN_SPEECH.findall(line):
+            if number := normalize_phone(match):
+                numbers.append(number)
+    return numbers
+
+
+@named("saved_phone_is_the_dictated_number")
+def saved_phone_is_the_dictated_number(run: RunResult, ctx: CheckContext) -> CheckResult:
+    """If the caller dictated a phone number, that is the one that must be saved (not the number
+    they called from). Nothing to check without a booking or a dictated number."""
+    name = "saved_phone_is_the_dictated_number"
+    numbers = dictated_numbers(run)
+    if not numbers or not run.bookings:
+        return result(name, True)
+    dictated = numbers[-1]
+    wrong = [b.phone for b in run.bookings if b.phone != dictated]
+    return result(name, not wrong, f"the caller dictated {dictated} but {wrong} was saved")
+
+
 INVARIANTS: tuple[Check, ...] = (
     no_foreign_script,
     no_written_down_before_confirm,
@@ -185,6 +205,7 @@ INVARIANTS: tuple[Check, ...] = (
     no_premature_confirm_attempt,
     end_call_not_with_accepted_save,
     no_acceptance_claim_without_save,
+    saved_phone_is_the_dictated_number,
 )
 INVARIANT_NAMES = tuple(c.check_name for c in INVARIANTS)
 

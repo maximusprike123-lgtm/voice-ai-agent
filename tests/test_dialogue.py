@@ -13,6 +13,7 @@ from agent.dialogue import (
     DialogueError,
     EndCall,
     Say,
+    SentenceBlocked,
     SentenceSplitter,
     ToolOutcome,
     ToolResult,
@@ -246,7 +247,7 @@ async def test_tool_call_then_second_llm_round_sees_the_result():
 
 async def test_tool_call_without_text_has_no_assistant_content():
     call = ToolCall("c1", "submit_booking", "{}")
-    engine, _, _ = make_engine(tool_turn(call), text("Записал."))
+    engine, _, _ = make_engine(tool_turn(call), text("Готово."))
 
     await collect(engine, "да, всё верно")
 
@@ -752,3 +753,175 @@ async def test_the_model_sees_the_greeting_on_the_first_turn():
     await collect(engine, "Хочу записаться")
 
     assert [m.content for m in llm.calls[0]] == ["SYS", "Здравствуйте!", "Хочу записаться"]
+
+
+# --- Speech guard in the engine -------------------------------------------------------------------
+
+from agent.text_guard import GUARD_FALLBACKS  # noqa: E402
+
+
+async def test_a_blocked_sentence_is_dropped_the_rest_is_spoken_and_the_history_matches():
+    engine, llm, _ = make_engine(text("Хорошо, записал. Как вас зовут?"))
+
+    events = await collect(engine, "Хочу записаться")
+
+    assert events == [
+        SentenceBlocked("written_down", "Хорошо, записал."),
+        Say("Как вас зовут?"),
+    ]
+    assert len(llm.calls) == 1  # no corrective round: something was left to say
+    assert engine.messages[-1] == Message(Role.ASSISTANT, "Как вас зовут?")  # what was heard
+    assert [v.rule for v in engine.guard.blocked] == ["written_down"]
+
+
+async def test_the_unterminated_tail_of_a_reply_is_checked_too():
+    engine, _, _ = make_engine(text("Спасибо. Номер 8 916 123 45 67"))
+
+    events = await collect(engine, "x")
+
+    assert events == [Say("Спасибо."), SentenceBlocked("phone_digits", "Номер 8 916 123 45 67")]
+
+
+async def test_a_reply_that_is_entirely_blocked_gets_one_corrective_round():
+    engine, llm, _ = make_engine(
+        text("Заявка принята, администратор перезвонит вам."),
+        text("Давайте уточним данные. Как вас зовут?"),
+    )
+
+    events = await collect(engine, "Хочу записаться")
+
+    assert events == [
+        SentenceBlocked("acceptance_claim", "Заявка принята, администратор перезвонит вам."),
+        Say("Давайте уточним данные."),
+        Say("Как вас зовут?"),
+    ]
+    assert len(llm.calls) == 2
+    note = llm.calls[1][-1]
+    assert note.role is Role.SYSTEM and note.content.startswith("Служебное сообщение")
+    assert "Заявка принята, администратор перезвонит вам." in note.content
+    assert llm.calls[0][-1] == Message(Role.USER, "Хочу записаться")  # the first round had no note
+    # the note was for that round only, and the blocked text was never in the history:
+    assert all("Служебное" not in (m.content or "") for m in engine.messages)
+    assert all("Заявка принята" not in (m.content or "") for m in engine.messages)
+    assert engine.messages[-1] == Message(Role.ASSISTANT, "Давайте уточним данные. Как вас зовут?")
+
+
+async def test_if_the_corrective_round_is_blocked_too_the_neutral_fallback_is_spoken():
+    engine, llm, _ = make_engine(
+        text("Заявка принята."), text("Ваша заявка передана администратору.")
+    )
+
+    events = await collect(engine, "Да, всё верно")
+
+    assert [type(e) for e in events] == [SentenceBlocked, SentenceBlocked, Say]
+    assert events[-1] == Say(GUARD_FALLBACKS["acceptance_claim"])
+    assert len(llm.calls) == 2  # no third round
+    assert engine.messages[-1] == Message(Role.ASSISTANT, GUARD_FALLBACKS["acceptance_claim"])
+
+
+async def test_if_the_corrective_round_says_nothing_the_fallback_is_spoken():
+    engine, llm, _ = make_engine(text("Хорошо, записал."), [StreamEnd("stop")])
+
+    events = await collect(engine, "x")
+
+    assert events[-1] == Say(GUARD_FALLBACKS["written_down"])
+    assert len(llm.calls) == 2
+
+
+async def test_the_fallback_matches_the_rule_that_blocked():
+    for sentence, rule in (
+        ("Номер 8 916 123 45 67.", "phone_digits"),
+        ("Скажу по-русски 五千.", "foreign_script"),
+    ):
+        engine, _, _ = make_engine(text(sentence), text(sentence))
+        events = await collect(engine, "x")
+        assert events[-1] == Say(GUARD_FALLBACKS[rule])
+
+
+async def test_a_blocked_sentence_next_to_a_tool_call_needs_no_corrective_round():
+    call = ToolCall("c1", "take_message", "{}")
+    engine, llm, tools = make_engine(
+        tool_turn(call, before="Хорошо, записал."), text("Передал вопрос.")
+    )
+
+    events = await collect(engine, "x")
+
+    assert events[0] == SentenceBlocked("written_down", "Хорошо, записал.")
+    assert tools.executed == [call]  # the tool ran normally
+    assert len(llm.calls) == 2  # the normal tool round trip, no corrective extra
+    assert engine.messages[2] == Message(Role.ASSISTANT, content=None, tool_calls=(call,))
+
+
+async def test_acceptance_claims_become_legal_once_a_tool_committed():
+    call = ToolCall("c1", "take_message", "{}")
+    engine, _, _ = make_engine(
+        tool_turn(call),
+        text("Заявка принята и передана администратору."),
+        tools=FakeTools(outcomes={"take_message": ToolOutcome("ok", committed=True)}),
+    )
+
+    events = await collect(engine, "x")
+
+    assert events[-1] == Say("Заявка принята и передана администратору.")
+    assert engine.guard.committed and engine.guard.blocked == []
+
+
+async def test_a_tool_that_did_not_commit_does_not_unlock_them():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, _, _ = make_engine(
+        tool_turn(call), text("Заявка принята."), text("Заявка принята.")
+    )  # FakeTools' default outcome: not committed
+
+    events = await collect(engine, "x")
+
+    assert any(isinstance(e, SentenceBlocked) for e in events)
+    assert not engine.guard.committed
+
+
+async def test_sentences_written_by_code_are_never_checked():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, _, _ = make_engine(
+        tool_turn(call),
+        tools=FakeTools(
+            outcomes={
+                "prepare_booking": ToolOutcome(
+                    "готово",
+                    say="Заявка принята и передана. Ваш номер 8 916 123 45 67. Записал.",
+                )
+            }
+        ),
+    )
+
+    events = await collect(engine, "x")
+
+    assert [type(e) for e in events] == [ToolResult, Say, Say, Say]  # nothing blocked
+
+
+async def test_the_guard_can_be_switched_off():
+    engine = DialogueEngine(
+        ScriptedLLM(text("Хорошо, записал.")), FakeTools(), "SYS", speech_guard=False
+    )
+
+    events = await collect(engine, "x")
+
+    assert events == [Say("Хорошо, записал.")] and engine.guard is None
+
+
+async def test_a_stalled_first_attempt_followed_by_a_blocked_reply_goes_straight_to_the_fallback():
+    engine, llm = make_fast_engine([ScriptedLLM.HANG], text("Заявка принята."))
+
+    events = await collect(engine, "x")
+
+    assert events[-1] == Say(GUARD_FALLBACKS["acceptance_claim"])
+    assert len(llm.calls) == 2  # the retry was already used for the stall
+
+
+async def test_cancelling_during_a_blocked_reply_keeps_only_what_was_spoken():
+    engine, llm, _ = make_engine(text("Хорошо, записал. Как вас зовут? Марку авто?"))
+
+    gen = engine.respond("x")
+    assert await anext(gen) == SentenceBlocked("written_down", "Хорошо, записал.")
+    assert await anext(gen) == Say("Как вас зовут?")
+    await gen.aclose()
+
+    assert engine.messages[-1] == Message(Role.ASSISTANT, "Как вас зовут?")

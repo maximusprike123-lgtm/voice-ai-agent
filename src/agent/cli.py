@@ -27,7 +27,7 @@ from pydantic import ValidationError
 
 from agent.app import Runtime, offset_clock, open_runtime
 from agent.business import BusinessConfigError
-from agent.dialogue import EndCall, Say, ToolResult
+from agent.dialogue import EndCall, Say, SentenceBlocked, ToolResult
 from agent.llm import LLMClient
 from agent.notifier import Notifier, format_record
 from agent.session import TurnFailed
@@ -219,6 +219,8 @@ async def _handle_turn(session, line: str, show_tools: bool, out: Out) -> None:
                 args = json.loads(event.call.arguments or "{}")
                 out(f"  [tool] {event.call.name}({json.dumps(args, ensure_ascii=False)})")
                 out(f"  [result] {event.result}")
+        elif isinstance(event, SentenceBlocked):
+            out(f"  [guard] blocked ({event.rule}): {event.text}")
         elif isinstance(event, TurnFailed):
             out(f"  [сбой] {event.reason} (подряд: {event.consecutive})")
         elif isinstance(event, EndCall):

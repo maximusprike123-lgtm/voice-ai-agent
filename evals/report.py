@@ -174,6 +174,8 @@ def format_report(graded: list[Graded], order: list[str]) -> str:
             )
             if example:
                 lines.append(f"    e.g. {example[:160]}")
+    lines += format_guard_blocks(graded, order)
+
     ignored = sum(s.markers_ignored for s in summaries.values())
     deferred = sum(g.run.farewells_deferred for g in graded)
     lines += [
@@ -182,6 +184,43 @@ def format_report(graded: list[Graded], order: list[str]) -> str:
         f"caller goodbyes deferred because the agent's reply asked a question: {deferred}",
     ]
     return "\n".join(lines)
+
+
+GUARD_RULES = ("phone_digits", "acceptance_claim", "written_down", "foreign_script")
+
+
+def guard_block_counts(graded: list[Graded]) -> dict[str, dict[str, int]]:
+    """scenario -> rule -> number of sentences the speech guard blocked (all runs)."""
+    counts: dict[str, dict[str, int]] = {}
+    for g in graded:
+        for item in g.run.blocked():
+            per_rule = counts.setdefault(g.run.scenario_id, {})
+            per_rule[item.rule] = per_rule.get(item.rule, 0) + 1
+    return counts
+
+
+def format_guard_blocks(graded: list[Graded], order: list[str]) -> list[str]:
+    """The model's raw violation attempts: what it wrote and the guard stopped. (The invariants
+    only see what was spoken, so with the guard on they can no longer show these.)"""
+    counts = guard_block_counts(graded)
+    total = {rule: sum(c.get(rule, 0) for c in counts.values()) for rule in GUARD_RULES}
+    lines = ["", "SPEECH GUARD BLOCKS (sentences the model wrote that were never spoken)", ""]
+    lines.append(
+        f"{'scenario':<24}" + "".join(f"{rule:>18}" for rule in GUARD_RULES) + f"{'runs hit':>10}"
+    )
+    for sid in order:
+        per_rule = counts.get(sid, {})
+        hit = sum(1 for g in graded if g.run.scenario_id == sid and g.run.blocked())
+        cells = "".join(f"{per_rule.get(rule, 0):>18}" for rule in GUARD_RULES)
+        lines.append(f"{sid:<24}{cells}{hit:>10}")
+    all_hit = sum(1 for g in graded if g.run.blocked())
+    lines.append(
+        f"{'ALL':<24}" + "".join(f"{total[rule]:>18}" for rule in GUARD_RULES) + f"{all_hit:>10}"
+    )
+    examples = [i for g in graded for i in g.run.blocked()][:6]
+    for item in examples:
+        lines.append(f"    e.g. ({item.rule}) {item.text[:140]}")
+    return lines
 
 
 def format_transcript(g: Graded) -> str:
@@ -201,6 +240,8 @@ def format_transcript(g: Graded) -> str:
             args = json.dumps(item.args, ensure_ascii=False)
             mark = "ОШИБКА " if item.is_error else ("SAVED " if item.committed else "")
             lines.append(f"  [tool] {item.tool}({args[:160]}) -> {mark}{item.text[:110]}")
+        elif item.kind == "blocked":
+            lines.append(f"  [guard: {item.rule}] {item.text}")
         elif item.kind == "failed":
             lines.append(f"  [сбой] {item.text}")
         elif item.kind == "end":
@@ -220,7 +261,7 @@ def format_transcript(g: Graded) -> str:
 def _item_json(item) -> dict:
     """turn and kind always; the other fields only when set. (`turn=0` must survive: 0 == False.)"""
     out = {"turn": item.turn, "kind": item.kind}
-    for name in ("text", "tool", "args", "committed", "is_error"):
+    for name in ("text", "tool", "args", "committed", "is_error", "rule"):
         value = getattr(item, name)
         if value not in ("", {}, False, None):
             out[name] = value

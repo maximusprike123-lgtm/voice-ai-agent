@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+from agent.business import load_business_config
 from agent.llm import LLMError, Message, Role, StreamEnd, TextDelta, ToolCall, ToolCallEvent
 from agent.settings import Settings
 from evals import __main__ as evals_main
@@ -21,7 +22,7 @@ from evals.caller import (
     build_persona_prompt,
     clean_reply,
 )
-from evals.checks import INVARIANT_NAMES
+from evals.checks import INVARIANT_NAMES, grade
 from evals.cost import (
     Usage,
     UsageMeter,
@@ -30,7 +31,7 @@ from evals.cost import (
     fetch_prices,
 )
 from evals.harness import run_once
-from evals.model import CheckResult, Item, RunResult
+from evals.model import CheckContext, CheckResult, Item, RunResult
 from evals.report import Graded, format_report, format_transcript, summarize, to_json
 from evals.scenarios import BY_ID, SCENARIOS
 
@@ -713,7 +714,7 @@ async def test_a_sweep_stops_starting_new_runs_when_told_to(tmp_path):
 async def test_sweep_grading_uses_the_scenario_checks_and_the_invariants(tmp_path):
     class Agent(ScriptedLLM):
         async def stream(self, messages, tools=None):
-            for event in text("Записал вас, готово."):  # a forbidden word, no records
+            for event in text("Это стоит двенадцать тысяч рублей."):  # an invented price
                 yield event
 
     class Caller(ScriptedLLM):
@@ -732,7 +733,7 @@ async def test_sweep_grading_uses_the_scenario_checks_and_the_invariants(tmp_pat
     )
 
     failed = {r.name for r in result.results if not r.passed}
-    assert "no_записал_before_confirm" in failed and "quotes_25000" in failed
+    assert "no_invented_prices" in failed and "quotes_25000" in failed
     assert result.status == "fail"
     names = {r.name for r in result.results}
     assert set(INVARIANT_NAMES) <= names and "quotes_25000" in names
@@ -1076,3 +1077,67 @@ def test_the_json_export_keeps_turn_zero_and_omits_empty_fields():
     assert items[0] == {"turn": 0, "kind": "say", "text": "Здравствуйте!"}  # turn 0 kept
     assert items[1] == {"turn": 1, "kind": "tool", "text": "ok", "tool": "end_call"}
     assert items[2] == {"turn": 1, "kind": "end"}
+
+
+# --- Speech guard blocks in the evals -------------------------------------------------------------
+
+
+async def test_the_harness_records_blocked_sentences_as_items_the_checks_do_not_see_as_speech(
+    tmp_path,
+):
+    agent = ScriptedLLM(text("Хорошо, записал. Я слушаю вас."), text("Всего доброго!"))
+    caller = ScriptedLLM(text("Сколько стоит?"), text("Спасибо, до свидания. [КОНЕЦ]"))
+
+    result = await run(BY_ID["price_only"], agent, caller, tmp_path)
+
+    [blocked] = result.blocked()
+    assert (blocked.kind, blocked.rule, blocked.text) == (
+        "blocked",
+        "written_down",
+        "Хорошо, записал.",
+    )
+    assert "записал" not in result.speech() and "Я слушаю вас." in result.speech()
+    # what was never spoken cannot fail the spoken-text invariants:
+    failed = {r.name for r in grade_run(result)}
+    assert "no_записал_before_confirm" not in failed
+
+
+def grade_run(result):
+    ctx = CheckContext(load_business_config(REPO_CONFIG), NOW)
+    return [r for r in grade(result, BY_ID["price_only"].checks, ctx) if not r.passed]
+
+
+def test_the_report_counts_guard_blocks_per_scenario_and_rule():
+    def with_blocks(sid, rules):
+        g = graded(sid, "pass")
+        g.run.items = [Item(1, "blocked", text=f"t-{r}", rule=r) for r in rules]
+        return g
+
+    runs = [
+        with_blocks("alpha", ["phone_digits", "written_down"]),
+        with_blocks("alpha", ["phone_digits"]),
+        with_blocks("beta", []),
+    ]
+
+    from evals.report import guard_block_counts
+
+    assert guard_block_counts(runs) == {"alpha": {"phone_digits": 2, "written_down": 1}}
+    report = format_report(runs, ["alpha", "beta"])
+    assert "SPEECH GUARD BLOCKS" in report
+    guard_section = report.split("SPEECH GUARD BLOCKS")[1]
+    alpha = next(line for line in guard_section.splitlines() if line.startswith("alpha"))
+    assert alpha.split()[-1] == "2"  # two runs were hit
+    assert alpha.split()[1:5] == ["2", "0", "1", "0"]  # phone_digits, acceptance, written, foreign
+    assert "e.g. (phone_digits) t-phone_digits" in report
+
+
+def test_the_transcript_and_json_show_blocked_sentences():
+    g = graded("alpha", "pass")
+    g.run.items = [Item(1, "blocked", text="Хорошо, записал.", rule="written_down")]
+    assert "[guard: written_down] Хорошо, записал." in format_transcript(g)
+    assert to_json([g])[0]["items"][0] == {
+        "turn": 1,
+        "kind": "blocked",
+        "text": "Хорошо, записал.",
+        "rule": "written_down",
+    }

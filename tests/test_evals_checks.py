@@ -238,7 +238,7 @@ def test_a_crashing_check_counts_as_a_failure_with_its_name():
 
 def test_every_invariant_is_named_and_unique():
     names = [inv.check_name for inv in c.INVARIANTS]
-    assert len(names) == len(set(names)) == len(c.INVARIANT_NAMES) == 9
+    assert len(names) == len(set(names)) == len(c.INVARIANT_NAMES) == 10
 
 
 # --- Scenario check factories ---------------------------------------------------------------------
@@ -774,3 +774,42 @@ def test_address_only_no_longer_penalises_a_message_for_an_unanswerable_follow_u
     run = ideal("address_only")
     run.messages = [message("Как проехать от метро")]
     assert [r.name for r in c.grade(run, BY_ID["address_only"].checks, CTX) if not r.passed] == []
+
+
+# --- The dictated-number invariant ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lines", "saved", "passes"),
+    [
+        (["Запишите на 8 916 123 45 67."], "+79161234567", True),
+        (["Запишите на 8 916 123 45 67."], CALLER_ID, False),  # used the caller ID instead
+        (["Мой номер +7 (916) 123-45-67."], "+79161234567", True),
+        (
+            ["Мой телефон 89161234567, нет, лучше 8 903 555 44 33."],
+            "+79035554433",
+            True,
+        ),  # the last
+        (["Мой телефон 89161234567, нет, лучше 8 903 555 44 33."], "+79161234567", False),
+        (["Запишите меня на 14:00."], CALLER_ID, True),  # nothing dictated: nothing to check
+        (["Да, на этот номер."], CALLER_ID, True),
+    ],
+)
+def test_saved_phone_is_the_dictated_number(lines, saved, passes):
+    run = run_with_caller_lines(lines, bookings=[booking(phone=saved)])
+    assert ok(c.saved_phone_is_the_dictated_number, run) is passes
+
+
+def test_the_dictated_number_check_is_silent_without_a_booking():
+    assert ok(c.saved_phone_is_the_dictated_number, run_with_caller_lines(["8 916 123 45 67"]))
+
+
+def test_dictated_numbers_ignore_times_dates_and_short_digit_strings():
+    run = run_with_caller_lines(["В 14:00, 26.09.2026, машина 2019 года, код 1234."])
+    assert c.dictated_numbers(run) == []
+
+
+def test_the_evals_and_the_guard_share_one_definition_of_an_acceptance_claim():
+    from agent.text_guard import ACCEPTANCE_CLAIM, WRITTEN_DOWN
+
+    assert c._ACCEPTANCE_CLAIM is ACCEPTANCE_CLAIM and c._WRITTEN_DOWN is WRITTEN_DOWN

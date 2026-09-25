@@ -62,7 +62,9 @@ owner via Telegram. No real calendar integration — the owner confirms manually
   numbers/dates/times are always in words; the model is never asked to say digits; an
   approximate time cannot become an invented HH:MM because it goes into `preferred_period`; the
   caller hears that a booking/message was accepted from a code-built sentence
-  (`confirm_booking` / `take_message` return `say`), never from a model round that could stall.
+  (`confirm_booking` / `take_message` return `say`), never from a model round that could stall;
+  and **a speech guard checks every sentence the model writes before it can be spoken** (phone
+  digits, false acceptance claims, «записал» before a save, foreign script).
   When a live run shows the model slipping on something that matters, move it into code
   rather than into more prompt text. The LLM keeps what is conversational: understanding the
   caller, phrasing questions, answering FAQ.
@@ -292,9 +294,65 @@ saved phone was the CALLER ID although the caller had dictated another number (h
 sweep 2 and 0/50 in sweep 3, so compare sweeps on the counts of specific failure kinds and use
 more runs per scenario (10 runs = 100 calls ≈ $0.30) before believing a 10-point difference.
 
-**Next:** a speech guard in code for phone digits, false acceptance claims and «записал» (plan
-approved first), then prompt changes (no own recap before `prepare_booking`; explicit "number
-unknown" when the caller ID is hidden), then a full sweep compared with baseline 3.
+**Speech guard (1.10 follow-up, `agent/text_guard.py` + `DialogueEngine`):** deterministic, no
+LLM call, applied to every sentence the MODEL writes before it becomes a `Say` (code-built
+sentences: read-back, acceptance, greeting, session fallbacks are not checked). Rules, in
+order: `foreign_script`; `phone_digits` (a run of more than 4 digits or number words; in a
+sentence about money only a digit group of 7+ counts); `acceptance_claim` («заявка
+принята/передана/отправлена/оформлена», «сообщение передано», «ваша просьба принята», not in a
+question) while nothing has been committed in this call; `written_down` (записал/записала/
+записали/записано/записан) while nothing has been committed. «администратор перезвонит/свяжется»
+is deliberately NOT a rule (2 of 3 such sentences in real calls were legitimate future
+statements). `SpeechGuard` keeps per-call state (`committed`, flipped by any
+`ToolOutcome.committed`) and `blocked`. **A blocked sentence is dropped** (a `SentenceBlocked(rule,
+text)` event, not spoken; WARNING log) and never enters the history as spoken text, so history
+= what the caller heard. Only if a whole reply would be silent (nothing left, no tool call) the
+engine asks the model ONCE more with a hidden `system` note that quotes the blocked sentence and
+says what to do («заявка НЕ сохранена: если клиент подтвердил, вызови confirm_booking…»; the
+note is for that round only, not kept in the history); if that round is blocked or empty too, a
+neutral fallback is spoken: `GUARD_FALLBACKS` = phone «Хорошо, номер есть.», acceptance
+«Давайте ещё раз проверим данные заявки.», записал «Хорошо.», foreign script «Простите,
+уточните, пожалуйста, ваш вопрос.» (gender-neutral, no digits, never blaming the caller; tests
+enforce it). A stalled first attempt that is followed by a fully blocked retry goes straight to
+the fallback. Verified live on DeepSeek: the mid-conversation `system` note is accepted and the
+model continues sensibly (next question, or `prepare_booking`). `SPEECH_GUARD=false` is a
+debugging kill switch. The CLI prints `[guard] blocked (rule): …`; evals record blocked sentences
+as items and report **"SPEECH GUARD BLOCKS" per scenario and rule** (the model's raw
+violation attempts; with the guard on the spoken-text invariants can no longer show them).
+`evals/compare.py` compares two sweeps (pass rates, counts of failed checks per 100 runs, guard
+blocks; a sweep without the guard is replayed through it offline).
+
+**Prompt pass:** no own recap before `prepare_booking` («СРАЗУ вызови prepare_booking, ничего
+не говоря перед этим»; no «всё верно?», no «Уточню…»); with «Номер звонящего: не определён» the
+number is UNKNOWN (never «определился», never «номер, с которого вы звоните», ask to dictate);
+a number the caller dictates beats the caller ID; a caller who clearly wants to BOOK an unlisted
+service gets an `other` booking, not «просто передать вопрос» (`take_message` only for
+questions without an answer); and a contradictory old rule was removed («Пиши … номера
+телефонов словами» told the model to spell phone numbers out). New invariant
+`saved_phone_is_the_dictated_number` (10 invariants now).
+
+**Final comparison (2026-09-25, 10 runs per scenario = 100 runs each, run simultaneously so the
+network conditions match; `python -m evals.compare data/evals/final_ref10 data/evals/final_new10`).
+Reference = the old agent (previous `prompt.py`, guard off), graded by the same checks; new = guard +
+prompt pass.** Raw pass rate **76/95 = 80% → 95/99 = 96%** (infra errors 5 → 1). Per scenario
+(ref → new): happy_path 5/9 → 10/10, approximate_time 7/10 → 10/10, changes_mind 9/10 → 10/10,
+hidden_caller_id 6/9 → 9/10, service_not_listed 4/9 → 9/10, question_outside_faq 9/10 → 10/10,
+sunday_closed 7/9 → 8/9, address_only 10/10 → 10/10, rude_offtopic 9/9 → 10/10, price_only 10/10 →
+9/10. **Counts of specific failure kinds (runs per 100):** full phone number spoken 8 → 0;
+«записал» spoken 4 → 0; saved the caller ID instead of the dictated number (`phone_ok`) 4 → 1;
+`service_not_listed` ending with a message and no booking (`exactly_one_booking`/`no_messages`) 3 → 0;
+`never_offers_this_number` 1 → 1; false acceptance claims 0 → 0 (none occurred in either 100). **Guard blocks
+(the model's raw attempts):** `phone_digits` 9 → **0** (the prompt fix, removing the old «номера
+телефонов словами» rule, removed the cause: the guard never had to act); `written_down` 5 → 6
+(the model still says «записал» at the same rate, prompt or not; now every one is blocked,
+before: spoken); `acceptance_claim` 0 → 0; `foreign_script` 0 → 0. **No fully blocked reply
+happened, so the corrective round never ran in the sweeps** (it is covered by tests and by the live probe).
+Warning `own_recap_before_prepare` 39 → 13 per 100 runs (the prompt cut it by two thirds, not to 0).
+Caller side: 3 markers ignored, 11 goodbyes deferred (new); 2 / 9 (ref).
+
+**Next:** step 2 (STT/TTS, local mic): pick the voice (gender!), wire `SpeechGuard` before TTS,
+decide the production LLM/provider order (see the latency issues), and re-run the latency study
+from the production VPS.
 
 **Remaining roadmap:** step 2 (STT/TTS, local mic) and step 3 (Asterisk + AudioSocket on the
 real VPS).
@@ -381,8 +439,8 @@ real VPS).
   `alibaba`, `streamlake`, `gmicloud` and `atlas-cloud` from routing; pinning `DeepSeek` fails
   with HTTP 404 "No endpoints found". Good for customer data (names, phone numbers), but the
   eligible set is US/EU infra providers, and changing those settings changes the latency picture.
-- **1.10 baseline 2: what the 14 failures of the second sweep are (triage from transcripts;
-  read this, not the raw 72%).** *Harness/check artifacts (5 runs, not agent faults):* the caller
+- **(Historical: before the guard and the prompt pass; the counts in «Final comparison» supersede
+  it) 1.10 baseline 2: what the 14 failures of the second sweep were (triage from transcripts).** *Harness/check artifacts (5 runs, not agent faults):* the caller
   volunteers its phone number together with its name, so `asks_for_a_number` (hidden_caller_id)
   can never fire (0/5 by construction; 2 more runs fail only on it); a caller line that says
   goodbye in the SAME turn as the read-back «да» ends the run before the agent can answer, and
@@ -412,6 +470,29 @@ real VPS).
   invented price, no confirm before a read-back, no premature confirm attempt, no hang-up in a
   save turn. These findings suggest moving more into code (e.g. a code-side check of spoken
   text for phone digits / acceptance claims, or dropping the model's own recap by prompt).
+- **1.10 status after the guard + prompt pass (what is still open, from the 99 gradable runs):**
+  (1) the model **still writes «записал/записала»** at the same rate (6 sentences / 99 runs; the
+  guard blocks them all, so callers no longer hear them, but the prompt rule does not work by
+  itself). (2) **The model still recaps before `prepare_booking`** in 13% of runs (was 39%).
+  (3) **Hidden caller ID:** 1/10 runs still offered «на номер, с которого вы звоните, или на
+  номер, который вы продиктовали?» (`never_offers_this_number`). (4) **Dictated number:** 1/10
+  sunday_closed run still saved the caller ID instead of the number the caller dictated
+  (`saved_phone_is_the_dictated_number`); it is only checked in evals, nothing enforces it in
+  code (idea: when the caller dictated digits, validate `prepare_booking`'s phone against the
+  digits heard, which needs the raw caller text in the tool layer). (5) **Two eval checks are
+  too strict, not the agent:** `other_service_no_price` fires when the agent quotes the price of
+  a LISTED alternative («у нас есть оклейка защитной плёнкой, от двадцати тысяч рублей») before
+  booking `other`, and `says_master_decides` wants the word «мастер» although «точная цена
+  зависит от размера и состояния автомобиля» says the same. (6) The model sometimes writes the
+  CALLER's line in its own reply («userЗаписывай на тот, что я продиктовал — восемь девять
+  один шесть…», seen in a live probe): role leakage, currently caught only if it trips a
+  guard rule. (7) `acceptance_claim` never fired in the 200 runs of the final comparison
+  (it happened once in ~250 earlier): rare but the guard covers it.
+- **Infra noise under load:** the final comparison ran both sweeps at once (6 concurrent agent
+  streams): 19 of 488 Together requests (3.9%) and 17 of 509 (3.3%) had a first token later than
+  4s (p90 2.6-2.9s, max 7-11s), versus 1-2 per ~250 in isolated sweeps; the retry rescued all but
+  1 (new) and 5 (ref) turns. A few requests fell back to Fireworks/OpenInference (the latter
+  slow: 6.8-11.9s). The tail depends on load and time; re-measure from the production VPS.
 - **Infra noise:** sweep 1: 10 first-token timeouts in ~190 requests (6 rescued by the retry, 4
   failed turns = 8% of runs); sweep 2: 1 timeout in 252 requests, 0 failed turns. Both sweeps
   had the Together/Fireworks pin, and in sweep 2 every request was served by Together, so the
@@ -443,6 +524,7 @@ real VPS).
 .venv/bin/python -m evals --dry-run                  # scenario evals: plan + cost estimate, no LLM calls
 .venv/bin/python -m evals [--scenarios a,b] [--runs 5]  # REAL LLM calls (~$0.16 per 50 runs), on demand only
 .venv/bin/python -m evals --calibrate-caller         # rank candidate caller models (cents)
+.venv/bin/python -m evals.compare <ref_dir> <new_dir>  # compare two sweeps: pass rates, failed checks, guard blocks
 .venv/bin/python -m agent.cli --show-tools           # talk to the agent in the terminal (see 1.9)
 .venv/bin/python -m agent.cli --script scripts/scenarios/booking_saturday_afternoon.txt \
     --caller +79991234567 --show-tools --db /tmp/scratch.db   # scripted call; add --notify for real Telegram

@@ -39,3 +39,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# The corpus of real spoken sentences is kept verbatim, one per line, not wrapped.
+"tests/test_text_guard.py" = ["E501"]

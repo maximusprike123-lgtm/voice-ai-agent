@@ -99,7 +99,9 @@ def test_static_part_holds_all_business_knowledge_and_nothing_per_call(business)
         assert expected in static
     for tool in ("prepare_booking", "confirm_booking", "take_message", "end_call"):
         assert tool in static
-    for per_call in ("Сейчас", "Номер звонящего", "Календарь", "+79161234567", "2026-09-24"):
+    # The static part may QUOTE the label «Номер звонящего: …» in its instructions; it must not
+    # contain the actual number, the clock or the calendar.
+    for per_call in ("Сейчас", "Календарь", "+79161234567", "2026-09-24"):
         assert per_call not in static
     for per_call in ("17:05", "+79161234567", "2026-09-24", "Календарь"):
         assert per_call in volatile
@@ -123,9 +125,49 @@ def test_static_part_describes_the_two_step_booking(business):
 
 def test_model_is_told_never_to_say_phone_digits(business):
     static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
-    assert "никогда не произноси цифры номера" in static
+    assert "никогда не произноси цифры номера, ни целиком, ни частями" in static
     assert "последние четыре цифры" not in static
-    assert "не определён или клиент хочет другой, попроси продиктовать" in static
+
+
+def test_the_prompt_no_longer_asks_for_phone_numbers_to_be_written_in_words(business):
+    """It used to say «Пиши числа, даты, время, цены и номера телефонов словами»: an instruction
+    to spell out phone numbers, contradicting the never-say-digits rule."""
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "цены и номера телефонов словами" not in static
+    assert "номера телефонов не произноси вообще" in static
+
+
+def test_hidden_caller_id_is_explicit_the_number_is_unknown(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "«Номер звонящего: не определён»" in static
+    assert "номер клиента тебе НЕИЗВЕСТЕН" in static
+    assert "не говори, что номер определился" in static
+    assert "никогда не предлагай «номер, с которого вы звоните»" in static
+    assert "сразу попроси клиента продиктовать номер" in static
+    hidden = build_system_prompt(business, NOW, None)
+    assert "Номер звонящего: не определён." in hidden.split(VOLATILE_MARKER)[1]
+
+
+def test_the_dictated_number_wins_over_the_caller_id(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "ДРУГОЙ номер" in static
+    assert "именно названный им номер, а не номер звонящего" in static
+
+
+def test_no_own_recap_before_prepare_booking(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "СРАЗУ вызови prepare_booking, ничего не говоря перед этим" in static
+    assert "не пересказывай данные заявки" in static
+    assert "не спрашивай «всё верно?»" in static
+    assert "не начинай фразу со слов «Уточню»" in static
+
+
+def test_a_caller_who_wants_to_book_an_unlisted_service_gets_an_other_booking(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "ясно хочет ЗАПИСАТЬСЯ на услугу, которой нет в списке" in static
+    assert "не предлагай «просто передать вопрос»" in static
+    assert "оформи запись с service_id other" in static
+    assert "take_message вызывай, только когда клиент ничего не заказывает" in static
 
 
 def test_static_part_forbids_saying_recorded_before_confirmation(business):

@@ -646,16 +646,32 @@ async def test_the_confirmation_wording_is_gender_neutral_and_has_no_digits(tool
     say = (await confirm(tools)).say
     await call(tools, "take_message", {"message": "вопрос"})
 
+    from agent.text_guard import GUARD_FALLBACKS
     from agent.tools import (
         BOOKING_ACCEPTED_SAY,
         BOOKING_ALREADY_ACCEPTED_SAY,
         MESSAGE_TAKEN_SAY,
     )
 
-    for text_ in (say, BOOKING_ACCEPTED_SAY, BOOKING_ALREADY_ACCEPTED_SAY, MESSAGE_TAKEN_SAY):
+    everything_the_code_says = (
+        say,
+        BOOKING_ACCEPTED_SAY,
+        BOOKING_ALREADY_ACCEPTED_SAY,
+        MESSAGE_TAKEN_SAY,
+        *GUARD_FALLBACKS.values(),  # what is said when the speech guard blocked a whole reply
+    )
+    for text_ in everything_the_code_says:
         assert not any(ch.isdigit() for ch in text_)
-        for gendered in ("принял", "записал", "передал", "понял"):
+        for gendered in ("принял", "записал", "передал", "понял", "расслышал", "уточнил"):
             assert gendered not in text_.lower()
+
+
+def test_the_guard_fallbacks_never_blame_the_caller():
+    from agent.text_guard import GUARD_FALLBACKS
+
+    for phrase in GUARD_FALLBACKS.values():
+        for blaming in ("ошиб", "неправильно", "неверно", "вы не ", "вы сказали", "вы неясно"):
+            assert blaming not in phrase.lower()
 
 
 async def test_a_duplicate_confirm_also_speaks_from_code(tools):

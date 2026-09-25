@@ -95,3 +95,9 @@ def test_llm_extra_body_rejects_invalid_json(env):
     env.setenv("LLM_EXTRA_BODY", "{not json")
     with pytest.raises(Exception, match="LLM_EXTRA_BODY|llm_extra_body"):
         Settings(_env_file=None)
+
+
+def test_the_speech_guard_is_on_by_default_and_has_a_kill_switch(env):
+    assert Settings(_env_file=None).speech_guard is True
+    env.setenv("SPEECH_GUARD", "false")
+    assert Settings(_env_file=None).speech_guard is False

@@ -56,6 +56,7 @@ class Runtime:
             build_system_prompt(self.business, now, caller_phone),
             first_event_timeout=self.settings.llm_first_event_timeout_seconds,
             event_timeout=self.settings.llm_event_timeout_seconds,
+            speech_guard=self.settings.speech_guard,
         )
         return CallSession(engine, self.business.greeting, self.sink, self.clock, caller_phone)
 
