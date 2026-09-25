@@ -94,6 +94,11 @@ args) re-validates the draft against the clock, saves it via the `RecordSink`
 duplicate guard per call. Errors go back to the model as `ОШИБКА: …`. Success text says
 "don't name a price" only for `other`. `take_message`, `end_call`. Schemas are static. The
 old `submit_booking` is gone. `business.yaml` may not use the id `other` (fails at load).
+**`end_call` guard:** the engine calls `ToolExecutor.begin_turn()` once per caller utterance;
+`end_call` returns `ОШИБКА` if a booking was accepted in the same turn (the caller hasn't heard
+it yet), so the model must ask «нужна ли помощь ещё?» and wait; it also covers a duplicate
+confirm. The prompt forbids «записал/записала/записано» before `confirm_booking` succeeds
+(use «хорошо», «принято»). Live check: the model asked and waited.
 **Engine:** `ToolOutcome.say` — when a tool round has it, the engine speaks the text as `Say`
 sentences, appends it to the history as an assistant message and ends the turn with no
 further LLM call (it waits for the caller). `ru_words.py` holds the reusable Russian
@@ -148,8 +153,8 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
   `preferred_period: "день"`, no `preferred_time`, phone normalized, confirm only after
   «да»). Still seen in that run: it asked «днём или ближе к вечеру?» after «после обеда»
   despite the prompt, and hung up (`end_call`) in the same turn as confirming, without
-  waiting for the caller's goodbye. Neither is a data-integrity problem, but both are
-  candidates for moving into code/prompt. One run is not reliability: 1.10 scenario tests
+  waiting for the caller's goodbye. The early hang-up is now blocked in code (see the
+  `end_call` guard); the time re-ask is left to the 1.10 scenario tests. One run is not reliability: 1.10 scenario tests
   must run several times and assert on tool arguments and on the spoken read-back.
 - **Empty model reply:** seen once (qwen3.5:4b, turn 2 of a conversation): the LLM returned
   no text and no tool call, so `DialogueEngine.respond()` yields no events and the caller

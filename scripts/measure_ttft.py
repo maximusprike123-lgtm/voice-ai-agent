@@ -91,6 +91,9 @@ STUB_TOOLS = [
 class StubTools:
     specs = STUB_TOOLS
 
+    def begin_turn(self) -> None:
+        pass
+
     async def execute(self, call: ToolCall) -> ToolOutcome:
         return ToolOutcome("ok", ends_call=call.name == "end_call")
 

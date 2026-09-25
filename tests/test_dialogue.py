@@ -69,6 +69,10 @@ class FakeTools:
         self.specs = specs or []
         self.outcomes = outcomes or {}
         self.executed: list[ToolCall] = []
+        self.turns_begun = 0
+
+    def begin_turn(self) -> None:
+        self.turns_begun += 1
 
     async def execute(self, call: ToolCall) -> ToolOutcome:
         self.executed.append(call)
@@ -302,6 +306,32 @@ async def test_looping_tool_calls_are_capped():
     calls = [c.id for m in engine.messages for c in m.tool_calls or ()]
     results = [m.tool_call_id for m in engine.messages if m.role is Role.TOOL]
     assert calls == results
+
+
+# --- begin_turn hook ------------------------------------------------------------------------------
+
+
+async def test_begin_turn_is_called_once_per_caller_utterance_before_tools_run():
+    order = []
+
+    class RecordingTools(FakeTools):
+        def begin_turn(self):
+            super().begin_turn()
+            order.append("begin_turn")
+
+        async def execute(self, call):
+            order.append(f"execute:{call.name}")
+            return await super().execute(call)
+
+    call = ToolCall("c1", "take_message", "{}")
+    tools = RecordingTools()
+    engine, _, _ = make_engine(tool_turn(call), text("Передал."), text("Пожалуйста."), tools=tools)
+
+    await collect(engine, "первая реплика")
+    await collect(engine, "вторая реплика")
+
+    assert order == ["begin_turn", "execute:take_message", "begin_turn"]
+    assert tools.turns_begun == 2  # a tool round inside one turn does not count as a new turn
 
 
 # --- Scripted speech (ToolOutcome.say) ------------------------------------------------------------

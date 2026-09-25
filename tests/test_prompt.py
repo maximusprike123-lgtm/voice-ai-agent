@@ -128,6 +128,21 @@ def test_model_is_told_never_to_say_phone_digits(business):
     assert "не определён или клиент хочет другой, попроси продиктовать" in static
 
 
+def test_static_part_forbids_saying_recorded_before_confirmation(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "Пока confirm_booking не вернул успех" in static
+    for word in ("«записал»", "«записала»", "«записано»"):
+        assert word in static
+    assert "«хорошо»" in static and "«принято»" in static
+
+
+def test_static_part_says_to_ask_for_more_help_and_wait_before_ending_the_call(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "спроси, нужна ли помощь ещё, и дождись ответа клиента" in static
+    assert "Не завершай звонок в том же ответе, в котором подтвердил заявку" in static
+    assert "Если end_call вернул ОШИБКА" in static
+
+
 def test_naive_datetime_is_rejected(business):
     with pytest.raises(ValueError, match="timezone-aware"):
         build_system_prompt(business, datetime(2026, 9, 24, 17, 5))

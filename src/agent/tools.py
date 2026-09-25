@@ -143,7 +143,11 @@ def build_tool_specs(business: BusinessConfig) -> list[ToolSpec]:
         ),
         ToolSpec(
             name="end_call",
-            description="Завершить звонок. Вызывай после прощания.",
+            description=(
+                "Завершить звонок. Вызывай после прощания. После принятой заявки сначала "
+                "спроси, нужна ли помощь ещё, и дождись ответа клиента: в том же ответе, где "
+                "заявка принята, звонок завершить нельзя."
+            ),
             parameters={"type": "object", "properties": {}},
         ),
     ]
@@ -180,6 +184,8 @@ class ToolRegistry:
         self._caller_phone = caller_phone
         self._draft: dict[str, Any] | None = None  # raw arguments of the pending booking
         self._submitted: set[tuple] = set()
+        self._turn = 0  # counts caller utterances (see begin_turn)
+        self._confirmed_in_turn: int | None = None  # turn of the last accepted booking
         self.specs = build_tool_specs(business)
         self._handlers = {
             "prepare_booking": self._prepare_booking,
@@ -187,6 +193,9 @@ class ToolRegistry:
             "take_message": self._take_message,
             "end_call": self._end_call,
         }
+
+    def begin_turn(self) -> None:
+        self._turn += 1
 
     def _now(self) -> datetime:
         now = self._clock()
@@ -258,6 +267,7 @@ class ToolRegistry:
         )
         if key in self._submitted:
             self._draft = None
+            self._confirmed_in_turn = self._turn
             return ToolOutcome("Эта заявка уже принята раньше. Повторно отправлять не нужно.")
 
         booking = Booking(
@@ -284,10 +294,13 @@ class ToolRegistry:
             )
         self._draft = None
         self._submitted.add(key)
+        self._confirmed_in_turn = self._turn
 
         result = (
             "Заявка принята и передана администратору. Скажи клиенту, что администратор "
-            "перезвонит для подтверждения записи. Не говори, что время подтверждено."
+            "перезвонит для подтверждения записи. Не говори, что время подтверждено. "
+            "Затем спроси, нужна ли помощь ещё, и дождись ответа: пока клиент не ответил, "
+            "end_call вызывать нельзя."
         )
         if fields.service_id == OTHER_SERVICE_ID:
             result += " Цену не называй: её определит мастер после осмотра."
@@ -333,6 +346,15 @@ class ToolRegistry:
     # --- end_call ------------------------------------------------------------------------
 
     async def _end_call(self, args: dict[str, Any]) -> ToolOutcome:
+        if self._confirmed_in_turn == self._turn:
+            # The booking was accepted in this very turn: the caller has not heard that yet,
+            # let alone said goodbye. Hanging up now would cut them off.
+            return _error(
+                "звонок завершить нельзя: клиент ещё не слышал, что заявка принята. Скажи, что "
+                "администратор перезвонит, спроси, нужна ли помощь ещё, и дождись ответа "
+                "клиента. Завершай звонок, только когда клиент попрощался или ничего больше "
+                "не нужно."
+            )
         return ToolOutcome("Звонок завершается.", ends_call=True)
 
 

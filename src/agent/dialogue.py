@@ -86,6 +86,11 @@ class ToolOutcome:
 class ToolExecutor(Protocol):
     specs: list[ToolSpec]
 
+    def begin_turn(self) -> None:
+        """Called once per caller utterance, before any tool of that turn runs. Lets a tool
+        tell "in the same turn" from "after the caller spoke again"."""
+        ...
+
     async def execute(self, call: ToolCall) -> ToolOutcome:
         """Run one tool call. Should report failures in `result` rather than raise."""
         ...
@@ -162,6 +167,7 @@ class DialogueEngine:
         history besides the user message, the user message is dropped too, so the caller can
         simply retry the same utterance.
         """
+        self._tools.begin_turn()
         checkpoint = len(self._messages)
         self._messages.append(Message(Role.USER, user_text))
 

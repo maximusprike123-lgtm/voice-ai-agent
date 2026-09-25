@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from agent.business import OTHER_SERVICE_ID, load_business_config
-from agent.dialogue import DialogueEngine, Say, ToolResult
+from agent.dialogue import DialogueEngine, EndCall, Say, ToolResult
 from agent.llm import Message, Role, StreamEnd, TextDelta, ToolCall, ToolCallEvent
 from agent.records import Booking, InMemorySink
 from agent.tools import (
@@ -522,6 +522,93 @@ async def test_end_call_accepts_empty_arguments(tools, raw):
     assert (await call(tools, "end_call", raw=raw)).ends_call
 
 
+# --- end_call guard: not in the same turn as an accepted booking ----------------------------------
+
+
+async def test_end_call_is_rejected_in_the_same_turn_as_a_successful_confirm(tools, sink):
+    tools.begin_turn()
+    await prepare(tools)
+    tools.begin_turn()  # the caller said «да»
+    assert not is_error(await confirm(tools))
+
+    outcome = await call(tools, "end_call")
+
+    assert is_error(outcome) and not outcome.ends_call
+    assert "дождись ответа" in outcome.result
+    assert len(sink.bookings) == 1  # the booking itself is unaffected
+
+
+async def test_end_call_is_allowed_once_the_caller_has_spoken_again(tools):
+    tools.begin_turn()
+    await book(tools)
+    tools.begin_turn()  # «нет, больше ничего, спасибо»
+
+    outcome = await call(tools, "end_call")
+
+    assert outcome.ends_call and not is_error(outcome)
+
+
+async def test_end_call_stays_rejected_for_the_rest_of_the_confirming_turn(tools):
+    tools.begin_turn()
+    await book(tools)
+
+    assert is_error(await call(tools, "end_call"))
+    assert is_error(await call(tools, "end_call"))  # retrying in the same turn changes nothing
+
+
+async def test_end_call_without_any_booking_is_always_allowed(tools):
+    tools.begin_turn()
+    assert (await call(tools, "end_call")).ends_call
+
+
+async def test_end_call_is_allowed_after_a_failed_confirm(business):
+    tools = ToolRegistry(business, BrokenSink(), clock=lambda: NOW)
+    tools.begin_turn()
+    await prepare(tools)
+    assert is_error(await confirm(tools))  # nothing was accepted
+
+    assert (await call(tools, "end_call")).ends_call
+
+
+async def test_end_call_is_allowed_after_a_rejected_confirm_without_a_draft(tools):
+    tools.begin_turn()
+    assert is_error(await confirm(tools))
+    assert (await call(tools, "end_call")).ends_call
+
+
+async def test_a_duplicate_confirm_counts_as_accepted_for_the_guard(tools):
+    tools.begin_turn()
+    await book(tools)
+    tools.begin_turn()  # the caller changes their mind and asks again with the same data
+    assert "уже принята" in (await book(tools)).result
+
+    assert is_error(await call(tools, "end_call"))
+
+
+async def test_a_second_booking_later_in_the_call_is_guarded_again(tools):
+    tools.begin_turn()
+    await book(tools)
+    tools.begin_turn()  # «да, ещё одну машину»
+    tools.begin_turn()
+    await book(tools, car="BMW X5")
+
+    assert is_error(await call(tools, "end_call"))
+    tools.begin_turn()
+    assert (await call(tools, "end_call")).ends_call
+
+
+async def test_the_success_result_tells_the_model_to_ask_and_wait(tools):
+    await prepare(tools)
+    result = (await confirm(tools)).result
+    assert "спроси, нужна ли помощь ещё" in result and "end_call вызывать нельзя" in result
+
+
+def test_the_end_call_schema_stays_static_and_mentions_the_rule(business):
+    spec = build_tool_specs(business)[3]
+    assert spec.name == "end_call" and spec.parameters == {"type": "object", "properties": {}}
+    assert "дождись ответа" in spec.description
+
+
 # --- Malformed calls ------------------------------------------------------------------------------
 
 
@@ -678,3 +765,38 @@ async def test_validation_error_goes_back_to_the_model_which_retries(business, s
     assert any(
         isinstance(e, Say) and "в субботу, двадцать шестого сентября" in e.text for e in second
     )
+
+
+async def test_model_that_confirms_and_hangs_up_in_one_turn_is_stopped_then_may_end_later(
+    business, sink
+):
+    confirm_call = ToolCall("c2", "confirm_booking", "{}")
+    hangup_early = ToolCall("c3", "end_call", "{}")
+    hangup_later = ToolCall("c4", "end_call", "{}")
+    llm = ScriptedLLM(
+        tool_round(prepare_call()),
+        # turn 2: the caller says «да»; the model confirms and tries to hang up in the same round
+        [ToolCallEvent(confirm_call), ToolCallEvent(hangup_early), StreamEnd("tool_calls")],
+        [
+            TextDelta("Администратор перезвонит вам. Нужна ли помощь ещё?"),
+            StreamEnd("stop"),
+        ],
+        # turn 3: «нет, спасибо»
+        [TextDelta("Всего доброго!"), ToolCallEvent(hangup_later), StreamEnd("tool_calls")],
+    )
+    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+
+    await collect_events(engine, "Запишите меня")
+    second = await collect_events(engine, "Да, всё верно")
+    third = await collect_events(engine, "Нет, спасибо")
+
+    assert len(sink.bookings) == 1
+    assert not any(isinstance(e, EndCall) for e in second)  # the call was NOT ended
+    early_result = [e for e in second if isinstance(e, ToolResult) and e.call.name == "end_call"]
+    assert early_result[0].result.startswith(ERROR_PREFIX)
+    assert Say("Администратор перезвонит вам.") in second and Say("Нужна ли помощь ещё?") in second
+    assert isinstance(third[-1], EndCall)
+
+
+async def collect_events(engine, user_text):
+    return [event async for event in engine.respond(user_text)]
