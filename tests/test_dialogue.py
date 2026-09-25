@@ -304,6 +304,150 @@ async def test_looping_tool_calls_are_capped():
     assert calls == results
 
 
+# --- Scripted speech (ToolOutcome.say) ------------------------------------------------------------
+
+
+READ_BACK = (
+    "Проверьте, пожалуйста: Игорь, полировка. Номер заканчивается на четыре пять. Всё верно?"
+)
+
+
+async def test_say_is_spoken_verbatim_as_sentences_and_ends_the_turn():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, llm, _ = make_engine(
+        tool_turn(call),
+        tools=FakeTools(outcomes={"prepare_booking": ToolOutcome("черновик готов", say=READ_BACK)}),
+    )
+
+    events = await collect(engine, "запишите меня")
+
+    assert events == [
+        ToolResult(call, "черновик готов"),
+        Say("Проверьте, пожалуйста: Игорь, полировка."),
+        Say("Номер заканчивается на четыре пять."),
+        Say("Всё верно?"),
+    ]
+    assert len(llm.calls) == 1  # no further LLM round: the engine waits for the caller
+
+
+async def test_say_goes_into_the_history_as_an_assistant_message():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, _, _ = make_engine(
+        tool_turn(call),
+        tools=FakeTools(outcomes={"prepare_booking": ToolOutcome("черновик готов", say=READ_BACK)}),
+    )
+
+    await collect(engine, "запишите меня")
+
+    assert engine.messages[2:] == [
+        Message(Role.ASSISTANT, content=None, tool_calls=(call,)),
+        Message(Role.TOOL, "черновик готов", tool_call_id="c1"),
+        Message(Role.ASSISTANT, READ_BACK),
+    ]
+
+
+async def test_next_turn_after_a_say_sends_the_read_back_to_the_llm():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, llm, _ = make_engine(
+        tool_turn(call),
+        text("Хорошо, отправляю."),
+        tools=FakeTools(outcomes={"prepare_booking": ToolOutcome("готово", say=READ_BACK)}),
+    )
+
+    await collect(engine, "запишите меня")
+    await collect(engine, "да")
+
+    assert llm.calls[1][-2:] == [Message(Role.ASSISTANT, READ_BACK), Message(Role.USER, "да")]
+
+
+async def test_model_text_before_the_tool_call_is_spoken_before_the_say():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, _, _ = make_engine(
+        tool_turn(call, before="Секунду. "),
+        tools=FakeTools(outcomes={"prepare_booking": ToolOutcome("готово", say="Всё верно?")}),
+    )
+
+    events = await collect(engine, "x")
+
+    assert [e for e in events if isinstance(e, Say)] == [Say("Секунду."), Say("Всё верно?")]
+
+
+async def test_several_says_in_one_round_are_spoken_in_order():
+    a, b = ToolCall("c1", "a", "{}"), ToolCall("c2", "b", "{}")
+    engine, llm, _ = make_engine(
+        tool_turn(a, b),
+        tools=FakeTools(
+            outcomes={
+                "a": ToolOutcome("ok", say="Первое сообщение."),
+                "b": ToolOutcome("ok", say="Второе сообщение."),
+            }
+        ),
+    )
+
+    events = await collect(engine, "x")
+
+    assert [e.text for e in events if isinstance(e, Say)] == [
+        "Первое сообщение.",
+        "Второе сообщение.",
+    ]
+    assert engine.messages[-1] == Message(Role.ASSISTANT, "Первое сообщение. Второе сообщение.")
+    assert len(llm.calls) == 1
+
+
+async def test_say_together_with_ends_call_speaks_then_hangs_up():
+    call = ToolCall("c1", "end_call", "{}")
+    engine, llm, _ = make_engine(
+        tool_turn(call),
+        tools=FakeTools(
+            outcomes={"end_call": ToolOutcome("ok", ends_call=True, say="Всего доброго!")}
+        ),
+    )
+
+    events = await collect(engine, "x")
+
+    assert events == [ToolResult(call, "ok"), Say("Всего доброго!"), EndCall()]
+    assert len(llm.calls) == 1
+
+
+async def test_tool_without_say_still_continues_with_another_llm_round():
+    call = ToolCall("c1", "take_message", "{}")
+    engine, llm, _ = make_engine(tool_turn(call), text("Передал."))
+
+    events = await collect(engine, "x")
+
+    assert events == [ToolResult(call, "ok"), Say("Передал.")]
+    assert len(llm.calls) == 2
+
+
+async def test_empty_say_is_ignored():
+    call = ToolCall("c1", "t", "{}")
+    engine, llm, _ = make_engine(
+        tool_turn(call),
+        text("Дальше."),
+        tools=FakeTools(outcomes={"t": ToolOutcome("ok", say="")}),
+    )
+
+    assert await collect(engine, "x") == [ToolResult(call, "ok"), Say("Дальше.")]
+
+
+async def test_barge_in_during_a_say_keeps_the_full_read_back_in_history():
+    call = ToolCall("c1", "prepare_booking", "{}")
+    engine, _, _ = make_engine(
+        tool_turn(call),
+        tools=FakeTools(outcomes={"prepare_booking": ToolOutcome("готово", say=READ_BACK)}),
+    )
+
+    gen = engine.respond("x")
+    assert isinstance(await anext(gen), ToolResult)
+    assert await anext(gen) == Say("Проверьте, пожалуйста: Игорь, полировка.")
+    await gen.aclose()  # the caller interrupts after the first sentence
+
+    # Trimming to what was actually heard is step 3 (mark_spoken); until then the model
+    # still knows what the caller was being asked, and every tool call has its result.
+    assert engine.messages[-1] == Message(Role.ASSISTANT, READ_BACK)
+    assert engine.messages[-2].role is Role.TOOL
+
+
 # --- Cancellation (barge-in) ----------------------------------------------------------------------
 
 

@@ -1,4 +1,9 @@
-"""The agent's tools: submit_booking, take_message, end_call.
+"""The agent's tools: prepare_booking, confirm_booking, take_message, end_call.
+
+Principle: code enforces guarantees, the LLM handles conversation. So a booking is two steps.
+`prepare_booking` validates, keeps a pending draft for this call and returns a read-back text
+built by code, which the engine speaks verbatim (ToolOutcome.say). `confirm_booking` saves the
+draft; the model calls it only after the caller says yes.
 
 `ToolRegistry` implements the `ToolExecutor` protocol of DialogueEngine. Validation problems
 are returned to the model as a result text starting with "ОШИБКА:" (never raised), so it can
@@ -10,22 +15,33 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from agent.business import OTHER_SERVICE_ID, BusinessConfig, Weekday
 from agent.dialogue import ToolOutcome
 from agent.llm import ToolCall, ToolSpec
-from agent.prompt import WEEKDAYS_RU, format_hours
+from agent.prompt import format_hours
 from agent.records import Booking, CallbackMessage, RecordSink
+from agent.ru_words import WEEKDAYS_RU, date_on_phrase, digits_words, time_words
 
 logger = logging.getLogger(__name__)
 
 MAX_HORIZON_DAYS = 90
 MAX_NAME_LENGTH = 100
 MAX_TEXT_LENGTH = 1000  # notes / message; keeps a future Telegram notification bounded
+PHONE_DIGITS_READ_BACK = 4  # the read-back always says exactly this many trailing digits
 
 ERROR_PREFIX = "ОШИБКА:"
+
+# preferred_period value -> how it is said in the read-back.
+PERIODS = {
+    "утро": "утром",
+    "день": "днём",
+    "вечер": "вечером",
+    "любое": "в любое время",
+}
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
@@ -46,11 +62,13 @@ def build_tool_specs(business: BusinessConfig) -> list[ToolSpec]:
     service_ids = [service.id for service in business.services] + [OTHER_SERVICE_ID]
     return [
         ToolSpec(
-            name="submit_booking",
+            name="prepare_booking",
             description=(
-                "Отправить заявку на запись администратору. Вызывай только после того, как "
-                "клиент подтвердил все данные заявки. Если вернулась ошибка, заявка НЕ "
-                "отправлена: уточни у клиента и вызови снова."
+                "Подготовить заявку на запись и проверить данные. Вызывай, когда собраны все "
+                "данные; при исправлении данных клиентом вызывай заново. Если вернулась ошибка, "
+                "уточни у клиента и вызови снова. Если ошибки нет, система САМА зачитает клиенту "
+                "текст для проверки: не пересказывай его и жди ответа клиента. Нужно передать "
+                "хотя бы одно из полей preferred_time или preferred_period."
             ),
             parameters={
                 "type": "object",
@@ -76,21 +94,36 @@ def build_tool_specs(business: BusinessConfig) -> list[ToolSpec]:
                     "preferred_time": {
                         "type": "string",
                         "description": (
-                            "Желаемое время, формат HH:MM (24 часа). Только если клиент назвал "
-                            "точное время. Если назван лишь примерный период, не заполняй."
+                            "Желаемое время, формат HH:MM (24 часа). ТОЛЬКО если клиент назвал "
+                            "точное время."
+                        ),
+                    },
+                    "preferred_period": {
+                        "type": "string",
+                        "enum": list(PERIODS),
+                        "description": (
+                            "Примерный период дня, если точное время не названо: утро, день "
+                            "(«после обеда»), вечер или любое («в любое время»)."
                         ),
                     },
                     "notes": {
                         "type": "string",
                         "description": (
-                            "Слова клиента, которые не попали в другие поля: примерный период "
-                            "(«после обеда»), пожелания; для услуги other обязательно: что "
-                            "именно нужно клиенту."
+                            "Слова клиента о времени как он их сказал («после обеда»), "
+                            "пожелания; для услуги other обязательно: что именно нужно клиенту."
                         ),
                     },
                 },
                 "required": ["name", "phone", "car", "service_id", "preferred_date"],
             },
+        ),
+        ToolSpec(
+            name="confirm_booking",
+            description=(
+                "Отправить подготовленную заявку администратору. Вызывай ТОЛЬКО после того, как "
+                "клиент ясно сказал «да» на зачитанный текст проверки. Без аргументов."
+            ),
+            parameters={"type": "object", "properties": {}},
         ),
         ToolSpec(
             name="take_message",
@@ -116,12 +149,23 @@ def build_tool_specs(business: BusinessConfig) -> list[ToolSpec]:
     ]
 
 
-class _ArgumentError(Exception):
-    """The model's arguments are unusable; the message goes back to the model."""
+@dataclass(frozen=True)
+class _Fields:
+    """A fully validated and normalized booking request."""
+
+    name: str
+    phone: str
+    car: str
+    service_id: str
+    service_name: str
+    preferred_date: date
+    preferred_time: time | None
+    preferred_period: str | None
+    notes: str | None
 
 
 class ToolRegistry:
-    """Executes tool calls for ONE phone call (it remembers what was already submitted)."""
+    """Executes tool calls for ONE phone call (it remembers the draft and what was submitted)."""
 
     def __init__(
         self,
@@ -134,10 +178,12 @@ class ToolRegistry:
         self._sink = sink
         self._clock = clock
         self._caller_phone = caller_phone
+        self._draft: dict[str, Any] | None = None  # raw arguments of the pending booking
         self._submitted: set[tuple] = set()
         self.specs = build_tool_specs(business)
         self._handlers = {
-            "submit_booking": self._submit_booking,
+            "prepare_booking": self._prepare_booking,
+            "confirm_booking": self._confirm_booking,
             "take_message": self._take_message,
             "end_call": self._end_call,
         }
@@ -151,9 +197,8 @@ class ToolRegistry:
     async def execute(self, call: ToolCall) -> ToolOutcome:
         handler = self._handlers.get(call.name)
         if handler is None:
-            return _error(
-                f"неизвестный инструмент {call.name!r}. Доступны: {', '.join(self._handlers)}."
-            )
+            names = ", ".join(self._handlers)
+            return _error(f"неизвестный инструмент {call.name!r}. Доступны: {names}.")
         try:
             args = json.loads(call.arguments) if call.arguments.strip() else {}
         except json.JSONDecodeError:
@@ -162,71 +207,69 @@ class ToolRegistry:
             return _error("аргументы вызова должны быть JSON-объектом.")
         return await handler(args)
 
-    # --- submit_booking -----------------------------------------------------------------
+    # --- prepare_booking / confirm_booking ---------------------------------------------------
 
-    async def _submit_booking(self, args: dict[str, Any]) -> ToolOutcome:
-        now = self._now()
-        problems: list[str] = []
-
-        name = _text(args, "name", problems, required=True)
-        if name and len(name) > MAX_NAME_LENGTH:
-            problems.append(f"name: слишком длинное (максимум {MAX_NAME_LENGTH} символов).")
-        car = _text(args, "car", problems, required=True)
-        notes = _text(args, "notes", problems)
-        if notes:
-            notes = notes[:MAX_TEXT_LENGTH]
-
-        phone = None
-        raw_phone = _text(args, "phone", problems, required=True)
-        if raw_phone:
-            phone = normalize_phone(raw_phone)
-            if phone is None:
-                problems.append(
-                    f"phone: {raw_phone!r} не похож на российский номер (нужно 10 цифр после "
-                    "+7). Переспроси номер у клиента."
-                )
-
-        service_id = _text(args, "service_id", problems, required=True)
-        service_name = None
-        if service_id == OTHER_SERVICE_ID:
-            service_name = "Другое / консультация"
-            if not notes:
-                problems.append(
-                    f"notes: для service_id={OTHER_SERVICE_ID} обязательно опиши, что нужно "
-                    "клиенту."
-                )
-        elif service_id:
-            service = self._business.service_by_id(service_id)
-            if service is None:
-                valid = ", ".join([s.id for s in self._business.services] + [OTHER_SERVICE_ID])
-                problems.append(
-                    f"service_id: неизвестная услуга {service_id!r}. Допустимо: {valid}."
-                )
-            else:
-                service_name = service.name
-
-        preferred_date = _parse_date(args, now, self._business, problems)
-        preferred_time = _parse_time(args, preferred_date, now, self._business, problems)
-
-        if problems:
+    async def _prepare_booking(self, args: dict[str, Any]) -> ToolOutcome:
+        # A failed re-prepare must not leave the previous draft confirmable: the caller has
+        # just changed something, so the old draft is stale either way.
+        self._draft = None
+        fields, problems = _validate_booking(args, self._now(), self._business)
+        if fields is None:
             return _error(
-                "заявка НЕ отправлена. Исправь и вызови снова:\n- " + "\n- ".join(problems)
+                "заявка НЕ подготовлена. Исправь и вызови снова:\n- " + "\n- ".join(problems)
             )
 
-        assert name and car and phone and service_id and service_name and preferred_date
-        key = (name, phone, car, service_id, preferred_date, preferred_time, notes)
+        self._draft = args  # replaces any earlier draft
+        return ToolOutcome(
+            result=(
+                "Заявка подготовлена, клиенту уже зачитан текст для проверки. Ничего не "
+                "пересказывай, жди ответа клиента. Если клиент ясно сказал «да», вызови "
+                "confirm_booking; если хочет что-то изменить, вызови prepare_booking заново."
+            ),
+            say=_read_back(fields),
+        )
+
+    async def _confirm_booking(self, args: dict[str, Any]) -> ToolOutcome:
+        if self._draft is None:
+            return _error(
+                "нет подготовленной заявки. Сначала вызови prepare_booking; confirm_booking "
+                "только после того, как клиент согласился с зачитанным текстом."
+            )
+        now = self._now()
+        # Re-validate: the call may have run past closing time or midnight since the draft.
+        fields, problems = _validate_booking(self._draft, now, self._business)
+        if fields is None:
+            self._draft = None
+            return _error(
+                "заявка больше не действительна, отправлять её нельзя:\n- "
+                + "\n- ".join(problems)
+                + "\nУточни данные у клиента и вызови prepare_booking заново."
+            )
+
+        key = (
+            fields.name,
+            fields.phone,
+            fields.car,
+            fields.service_id,
+            fields.preferred_date,
+            fields.preferred_time,
+            fields.preferred_period,
+            fields.notes,
+        )
         if key in self._submitted:
+            self._draft = None
             return ToolOutcome("Эта заявка уже принята раньше. Повторно отправлять не нужно.")
 
         booking = Booking(
-            name=name,
-            phone=phone,
-            car=car,
-            service_id=service_id,
-            service_name=service_name,
-            preferred_date=preferred_date,
-            preferred_time=preferred_time,
-            notes=notes,
+            name=fields.name,
+            phone=fields.phone,
+            car=fields.car,
+            service_id=fields.service_id,
+            service_name=fields.service_name,
+            preferred_date=fields.preferred_date,
+            preferred_time=fields.preferred_time,
+            preferred_period=fields.preferred_period,
+            notes=fields.notes,
             caller_phone=self._caller_phone,
             created_at=now,
         )
@@ -234,18 +277,21 @@ class ToolRegistry:
             await self._sink.add_booking(booking)
         except Exception:
             logger.exception("could not store booking")
+            # The draft stays, so confirm_booking can be retried.
             return _error(
                 "заявку сохранить не удалось из-за технической проблемы. Извинись, скажи, что "
                 "записать сейчас не получилось, и попроси клиента перезвонить позже."
             )
+        self._draft = None
         self._submitted.add(key)
 
         result = (
             "Заявка принята и передана администратору. Скажи клиенту, что администратор "
-            "перезвонит для подтверждения записи. Не говори, что время подтверждено. "
-            "Цену не называй: её определит мастер."
+            "перезвонит для подтверждения записи. Не говори, что время подтверждено."
         )
-        if preferred_time is None:
+        if fields.service_id == OTHER_SERVICE_ID:
+            result += " Цену не называй: её определит мастер после осмотра."
+        if fields.preferred_time is None:
             result += " Точное время не указано: администратор уточнит его при звонке."
         return ToolOutcome(result)
 
@@ -288,6 +334,116 @@ class ToolRegistry:
 
     async def _end_call(self, args: dict[str, Any]) -> ToolOutcome:
         return ToolOutcome("Звонок завершается.", ends_call=True)
+
+
+# --- Validation ---------------------------------------------------------------------------------
+
+
+def _validate_booking(
+    args: dict[str, Any], now: datetime, business: BusinessConfig
+) -> tuple[_Fields | None, list[str]]:
+    """Validate and normalize booking arguments. Returns (fields, []) or (None, problems)."""
+    problems: list[str] = []
+
+    name = _text(args, "name", problems, required=True)
+    if name and len(name) > MAX_NAME_LENGTH:
+        problems.append(f"name: слишком длинное (максимум {MAX_NAME_LENGTH} символов).")
+    car = _text(args, "car", problems, required=True)
+    notes = _text(args, "notes", problems)
+    if notes:
+        notes = notes[:MAX_TEXT_LENGTH]
+
+    phone = None
+    raw_phone = _text(args, "phone", problems, required=True)
+    if raw_phone:
+        phone = normalize_phone(raw_phone)
+        if phone is None:
+            problems.append(
+                f"phone: {raw_phone!r} не похож на российский номер (нужно 10 цифр после "
+                "+7). Переспроси номер у клиента."
+            )
+
+    service_id = _text(args, "service_id", problems, required=True)
+    service_name = None
+    if service_id == OTHER_SERVICE_ID:
+        service_name = "Другое / консультация"
+        if not notes:
+            problems.append(
+                f"notes: для service_id={OTHER_SERVICE_ID} обязательно опиши, что нужно клиенту."
+            )
+    elif service_id:
+        service = business.service_by_id(service_id)
+        if service is None:
+            valid = ", ".join([s.id for s in business.services] + [OTHER_SERVICE_ID])
+            problems.append(f"service_id: неизвестная услуга {service_id!r}. Допустимо: {valid}.")
+        else:
+            service_name = service.name
+
+    preferred_date = _parse_date(args, now, business, problems)
+
+    raw_time = _text(args, "preferred_time", problems)
+    preferred_time = _parse_time(raw_time, preferred_date, now, business, problems)
+    period = _text(args, "preferred_period", problems)
+    if period is not None and period not in PERIODS:
+        problems.append(f"preferred_period: {period!r} — допустимо только: {', '.join(PERIODS)}.")
+        period = None
+    if raw_time is None and period is None and not _mentions(problems, "preferred_period"):
+        problems.append(
+            "нужно указать время: preferred_time, если клиент назвал точное время, или "
+            f"preferred_period ({', '.join(PERIODS)}), если только примерный период. Не "
+            "придумывай точное время."
+        )
+
+    if problems:
+        return None, problems
+    assert name and car and phone and service_id and service_name and preferred_date
+    return (
+        _Fields(
+            name=name,
+            phone=phone,
+            car=car,
+            service_id=service_id,
+            service_name=service_name,
+            preferred_date=preferred_date,
+            preferred_time=preferred_time,
+            preferred_period=period,
+            notes=notes,
+        ),
+        [],
+    )
+
+
+def _mentions(problems: list[str], field: str) -> bool:
+    return any(p.startswith(f"{field}:") for p in problems)
+
+
+def _read_back(fields: _Fields) -> str:
+    """The text the caller hears before confirming. Built by code, numbers in words."""
+    if fields.service_id == OTHER_SERVICE_ID:
+        service = f"другая услуга, вы описали так: {fields.notes}"
+    else:
+        service = _lower_first(fields.service_name)
+
+    if fields.preferred_time is not None:
+        when = f"в {time_words(fields.preferred_time)}"
+    else:
+        assert fields.preferred_period is not None
+        when = PERIODS[fields.preferred_period]
+
+    last_digits = digits_words(fields.phone[-PHONE_DIGITS_READ_BACK:])
+    return (
+        f"Проверьте, пожалуйста: {fields.name}, {service}, автомобиль {fields.car}, "
+        f"{date_on_phrase(fields.preferred_date)}, {when}. "
+        f"Номер телефона заканчивается на {last_digits}. "
+        "Всё верно?"
+    )
+
+
+def _lower_first(text: str) -> str:
+    """'Полировка кузова' -> 'полировка кузова', but leave 'PPF' and similar alone."""
+    if len(text) > 1 and text[0].isupper() and text[1].islower():
+        return text[0].lower() + text[1:]
+    return text
 
 
 # --- helpers ---------------------------------------------------------------------------------
@@ -345,20 +501,19 @@ def _parse_date(
 
 
 def _parse_time(
-    args: dict[str, Any],
+    raw: str | None,
     day: date | None,
     now: datetime,
     business: BusinessConfig,
     problems: list[str],
 ) -> time | None:
-    raw = _text(args, "preferred_time", problems)
     if raw is None:
         return None
     match = _TIME_RE.match(raw)
     if not match or int(match[1]) > 23 or int(match[2]) > 59:
         problems.append(
             f"preferred_time: {raw!r} — нужно время HH:MM. Если клиент назвал лишь примерный "
-            "период, не заполняй это поле, а запиши его слова в notes."
+            "период, не заполняй это поле, а передай preferred_period."
         )
         return None
     value = time(int(match[1]), int(match[2]))

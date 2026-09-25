@@ -17,7 +17,8 @@ class Booking:
     service_id: str  # a business.yaml service id, or "other"
     service_name: str
     preferred_date: date
-    preferred_time: time | None  # None: the caller gave no exact time (see notes)
+    preferred_time: time | None  # exact time, only if the caller named one
+    preferred_period: str | None  # "утро" | "день" | "вечер" | "любое"
     notes: str | None
     caller_phone: str | None  # the number the call came from, if known
     created_at: datetime

@@ -49,6 +49,16 @@ owner via Telegram. No real calendar integration — the owner confirms manually
   - **STT/TTS:** vendor not chosen yet (candidates: ElevenLabs, Deepgram). Foreign services
     are acceptable for the MVP despite the RU-only telephony/LLM hosting constraint — this
     may need a network path check once a vendor is picked.
+- **Principle: code enforces guarantees, the LLM handles conversation.** Anything the business
+  relies on must not depend on the model obeying the prompt. Examples so far: booking data is
+  validated and normalized in code; a booking is saved only by `confirm_booking` after code
+  has read the draft back; the read-back text is built by code and spoken verbatim by the
+  engine (`ToolOutcome.say`), so its phone digits are always exactly the last 4 and its
+  numbers/dates/times are always in words; the model is never asked to say digits; an
+  approximate time cannot become an invented HH:MM because it goes into `preferred_period`.
+  When a live run shows the model slipping on something that matters, move it into code
+  rather than into more prompt text. The LLM keeps what is conversational: understanding the
+  caller, phrasing questions, answering FAQ.
 - **Knowledge:** `config/business.yaml` (hours, services, prices, FAQ) loaded straight into
   the system prompt. No RAG — the FAQ is small and fixed.
 - **Bookings:** validated, then **written to SQLite before** the Telegram notification is
@@ -69,16 +79,30 @@ the per-call content (time, caller number, 14-day calendar) last, after `VOLATIL
 a test pins the shared prefix. Tool schemas (1.6) must stay static too: no dates, caller data
 or other per-call content in tool names/descriptions/parameters.
 
-1.6 (tools, `src/agent/tools.py` + `records.py`: `ToolRegistry` implements `ToolExecutor`;
-`submit_booking` validates and normalizes — phone → `+7XXXXXXXXXX`, date required, not in the
-past, ≤ 90 days ahead, on a working day; `preferred_time` optional but if given must be within
-that day's hours (and not already past today); `service_id` from business.yaml or the reserved
-`other` (then `notes` required, no price ever returned); duplicate guard per call. Validation
-errors go back to the model as `ОШИБКА: …` results. `take_message`, `end_call`. Schemas are
-static (built from business.yaml only). Records go to a `RecordSink` — `InMemorySink` for now.
-`business.yaml` may not use the id `other` (fails at load). The prompt's static part got the
-`other` rule, the "approximate period → no `preferred_time`, words into `notes`" rule and an
-`ОШИБКА` rule. `scripts/live_booking_dialogue.py` runs a scripted caller against the real LLM.)
+1.6 / 1.6b (tools, `src/agent/tools.py` + `records.py` + `ru_words.py`; `ToolRegistry`
+implements `ToolExecutor`). Booking is **two-step**: `prepare_booking(...)` validates and
+normalizes (phone → `+7XXXXXXXXXX`; date required, not in the past, ≤ 90 days ahead, on a
+working day; `preferred_time` HH:MM only for an exact time, checked against that day's hours
+and not already past today; `preferred_period` ∈ утро/день/вечер/любое; at least one of the
+two required, both allowed and both stored, exact time wins in the read-back; `service_id`
+from business.yaml or the reserved `other` — `notes` then required; caller's own words go to
+`notes`), stores a draft for this call (a new or failed prepare discards the old draft) and
+returns `ToolOutcome.say` = a read-back built by code («Проверьте, пожалуйста: … Номер
+телефона заканчивается на <ровно 4 цифры словами>. Всё верно?»). `confirm_booking()` (no
+args) re-validates the draft against the clock, saves it via the `RecordSink`
+(`InMemorySink` for now; a sink failure keeps the draft so confirm can be retried), and has a
+duplicate guard per call. Errors go back to the model as `ОШИБКА: …`. Success text says
+"don't name a price" only for `other`. `take_message`, `end_call`. Schemas are static. The
+old `submit_booking` is gone. `business.yaml` may not use the id `other` (fails at load).
+**Engine:** `ToolOutcome.say` — when a tool round has it, the engine speaks the text as `Say`
+sentences, appends it to the history as an assistant message and ends the turn with no
+further LLM call (it waits for the caller). `ru_words.py` holds the reusable Russian
+number/date/time word tables and functions (for `text_normalize.py` later). Prompt (static
+part): read nothing back yourself, `confirm_booking` only after a clear «да», the model
+never says phone digits (asks «Записать вас на номер, с которого вы звоните?»; without
+caller ID it asks the caller to dictate a number), approximate period → `preferred_period`,
+don't re-ask the time. `scripts/live_booking_dialogue.py` runs a scripted caller against the
+real LLM.
 
 Backend switch (after 1.6): main LLM is now OpenRouter DeepSeek (see Architecture);
 `check_llm.py` gained the token-based "no hidden reasoning" check (it fails if
@@ -115,16 +139,18 @@ local mic) and step 3 (Asterisk + AudioSocket on the real VPS).
 - **Small Qwen models sometimes insert Chinese characters** (seen once on qwen3.5:4b:
   "тридцати五千 рублей"). Step 1.10 scenario tests must check replies for non-Cyrillic/Latin
   scripts, and a guard is needed before TTS. Applies to any backend, not only Qwen.
-- **Booking-rule compliance is model-dependent** (`scripts/live_booking_dialogue.py`, caller:
-  "в субботу после обеда"). qwen3.5:4b, 3 runs: invented `name`/`car` placeholders, submitted
-  without the confirmation step, invented `preferred_time` "15:30", a needless `take_message`
-  after a validation error, promised "есть свободные места", garbled Russian.
-  DeepSeek v4.1 flash, 1 run: followed the whole flow (asked in order, read the request back,
-  submitted only after "всё верно", left `preferred_time` empty and put the caller's words
-  in `notes`, normalized phone, never confirmed the slot). Only one run, so not proof:
-  minor slip seen — it read out five digits of the caller's number instead of four. The tool
-  layer cannot detect invented-but-valid values, so 1.10 scenario tests must assert on tool
-  arguments (e.g. no invented `preferred_time`), across several runs.
+- **Conversation-level rule compliance is still model-dependent** (`live_booking_dialogue.py`,
+  caller: "в субботу после обеда"). qwen3.5:4b (3 runs, old one-step flow): invented
+  placeholders, skipped confirmation, invented `preferred_time`, needless `take_message`,
+  promised free slots, garbled Russian. DeepSeek v4.1 flash, one-step flow: fine but read
+  five digits of the number instead of four and re-asked the time. **Two-step flow on
+  DeepSeek, 1 run:** correct end to end (read-back by code with exactly four digits,
+  `preferred_period: "день"`, no `preferred_time`, phone normalized, confirm only after
+  «да»). Still seen in that run: it asked «днём или ближе к вечеру?» after «после обеда»
+  despite the prompt, and hung up (`end_call`) in the same turn as confirming, without
+  waiting for the caller's goodbye. Neither is a data-integrity problem, but both are
+  candidates for moving into code/prompt. One run is not reliability: 1.10 scenario tests
+  must run several times and assert on tool arguments and on the spoken read-back.
 - **Empty model reply:** seen once (qwen3.5:4b, turn 2 of a conversation): the LLM returned
   no text and no tool call, so `DialogueEngine.respond()` yields no events and the caller
   would hear silence. Decide handling (retry / fallback phrase) in 1.9 or 1.10.

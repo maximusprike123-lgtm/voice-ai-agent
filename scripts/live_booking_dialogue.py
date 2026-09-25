@@ -6,8 +6,11 @@ Not part of `pytest` (real backend, real clock):
 
 A scripted "caller" answers whatever the agent just asked (matched by keywords), so the
 transcript stays coherent even if the model asks in a different order. This caller gives only
-an approximate time ("в субботу после обеда"), so a correct run leaves preferred_time empty
-and puts the caller's words into notes. Records go to an InMemorySink; nothing is persisted.
+an approximate time ("в субботу после обеда"), so a correct run leaves preferred_time
+empty, sets preferred_period to "день" and puts the caller's words into notes.
+The booking is two-step: prepare_booking (the read-back is spoken by the engine, not the model),
+then confirm_booking after the caller says yes. Records go to an InMemorySink; nothing is
+persisted.
 """
 
 import asyncio

@@ -62,7 +62,7 @@ def test_prompt_caller_phone(business):
 
 def test_prompt_names_the_tools(business):
     prompt = build_system_prompt(business, NOW)
-    for tool in ("submit_booking", "take_message", "end_call"):
+    for tool in ("prepare_booking", "confirm_booking", "take_message", "end_call"):
         assert tool in prompt
 
 
@@ -97,7 +97,7 @@ def test_static_part_holds_all_business_knowledge_and_nothing_per_call(business)
     assert static.startswith("Ты — голосовой администратор")
     for expected in (business.name, business.address, "# Услуги и цены", "# Частые вопросы"):
         assert expected in static
-    for tool in ("submit_booking", "take_message", "end_call"):
+    for tool in ("prepare_booking", "confirm_booking", "take_message", "end_call"):
         assert tool in static
     for per_call in ("Сейчас", "Номер звонящего", "Календарь", "+79161234567", "2026-09-24"):
         assert per_call not in static
@@ -109,8 +109,23 @@ def test_static_part_explains_other_service_and_approximate_time(business):
     static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
     assert "service_id other" in static
     assert "не придумывай точное время" in static
-    assert "preferred_time" in static and "notes" in static
+    assert "preferred_time" in static and "preferred_period" in static and "notes" in static
     assert "ОШИБКА" in static
+
+
+def test_static_part_describes_the_two_step_booking(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "submit_booking" not in build_system_prompt(business, NOW)
+    assert "prepare_booking" in static and "confirm_booking" in static
+    assert "не пересказывай" in static  # the read-back is spoken by the system
+    assert "ясно сказал «да»" in static
+
+
+def test_model_is_told_never_to_say_phone_digits(business):
+    static = build_system_prompt(business, NOW).split(VOLATILE_MARKER)[0]
+    assert "никогда не произноси цифры номера" in static
+    assert "последние четыре цифры" not in static
+    assert "не определён или клиент хочет другой, попроси продиктовать" in static
 
 
 def test_naive_datetime_is_rejected(business):

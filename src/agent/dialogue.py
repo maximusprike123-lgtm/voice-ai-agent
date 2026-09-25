@@ -77,6 +77,10 @@ DialogueEvent = Say | ToolResult | EndCall
 class ToolOutcome:
     result: str  # text handed back to the model as the tool message
     ends_call: bool = False
+    # Text the engine speaks to the caller verbatim, bypassing the model. When any tool call of
+    # a round has it, the turn ends there: the text goes into the history as an assistant
+    # message and the engine waits for the caller instead of calling the LLM again.
+    say: str | None = None
 
 
 class ToolExecutor(Protocol):
@@ -126,6 +130,15 @@ class SentenceSplitter:
             return None
         self._carry = ""
         return candidate
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split a complete text into the sentence units TTS speaks."""
+    splitter = SentenceSplitter()
+    sentences = splitter.feed(text)
+    if tail := splitter.flush():
+        sentences.append(tail)
+    return sentences
 
 
 # --- Engine -------------------------------------------------------------------------------------
@@ -191,6 +204,7 @@ class DialogueEngine:
                 return
 
             ends_call = False
+            scripted: list[str] = []  # ToolOutcome.say texts, spoken as-is after the tools ran
             done = 0
             try:
                 for call in calls:
@@ -198,6 +212,8 @@ class DialogueEngine:
                     self._messages.append(Message(Role.TOOL, outcome.result, tool_call_id=call.id))
                     done += 1
                     ends_call = ends_call or outcome.ends_call
+                    if outcome.say:
+                        scripted.append(outcome.say)
                     yield ToolResult(call, outcome.result)
             except (asyncio.CancelledError, GeneratorExit):
                 # Never leave a tool call in the history without a matching result.
@@ -207,6 +223,16 @@ class DialogueEngine:
                     )
                 raise
 
+            if scripted:
+                text = " ".join(scripted)
+                # In the history before it is spoken, so a barge-in mid-sentence still leaves
+                # the model knowing what the caller was being asked.
+                self._messages.append(Message(Role.ASSISTANT, text))
+                for sentence in split_sentences(text):
+                    yield Say(sentence)
+                if ends_call:
+                    yield EndCall()
+                return  # wait for the caller: no further LLM round
             if ends_call:
                 yield EndCall()
                 return
