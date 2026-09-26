@@ -89,7 +89,9 @@ routing, guardrails, infra noise) are in [latency.md](latency.md). Eval history 
   only, so «14:00, 8 916…» with no word between them is missed) and `ToolRegistry._phone_conflict`
   in `prepare_booking` / `take_message`: error «клиент называл другой номер» once per dictated
   number, a repeat after the caller spoke again goes through. Sweep results and the caveat that
-  the failures it was meant to remove were mostly eval artifacts: docs/evals.md (Step 1.12 sweep).
+  the failures it was meant to remove were mostly eval artifacts: docs/evals.md (Step 1.12 sweep);
+  the artifact itself (`saved_phone_is_the_dictated_number` / `phone_ok` when the simulated caller
+  chooses the caller ID) is fixed in the checks.
   (7) `acceptance_claim` never fired in the 200 runs of the final comparison
   (it happened once in ~250 earlier): rare but the guard covers it.
 - **Background-process gotcha for long sweeps in this environment:** a sweep started with a

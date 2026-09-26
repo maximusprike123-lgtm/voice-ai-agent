@@ -928,3 +928,138 @@ def test_the_evals_and_the_guard_share_one_definition_of_an_acceptance_claim():
     from agent.text_guard import ACCEPTANCE_CLAIM, WRITTEN_DOWN
 
     assert c._ACCEPTANCE_CLAIM is ACCEPTANCE_CLAIM and c._WRITTEN_DOWN is WRITTEN_DOWN
+
+
+# --- The caller chose the number they call from -----------------------------------------------
+
+# The caller lines of two real runs that used to fail (sunday_closed, final_new10 #9 and
+# grounding10 #3): the caller dictated a number, was asked which one to use, and chose the caller
+# ID. The agent saved the caller ID, which is right.
+REAL_FINAL_9 = [
+    "Здравствуйте, я хочу записаться на полировку кузова в это воскресенье на 12:00.",
+    "Да, хорошо, давайте на понедельник, на 12:00.",
+    "Игорь. Моя машина — Тойота Камри. Телефон для связи 8 916 123 45 67.",
+    "На номер, с которого я звоню, спасибо.",
+    "Да, всё верно.",
+    "Нет, спасибо. До свидания.",
+]
+REAL_GROUNDING_3 = [
+    "Здравствуйте, я хочу записаться на полировку кузова в это воскресенье на 12:00.",
+    "Тогда перенесите на понедельник, двадцать седьмого сентября, на 12:00.",
+    "Да, извините, тогда на понедельник, двадцать восьмого сентября, на 12:00.",
+    "Игорь. Телефон для связи 8 916 123 45 67.",
+    "На тот же номер, с которого я звонил, 8 916 123 45 67.",
+    "Тойота Камри.",
+    "Да, всё правильно.",
+    "Нет, спасибо. До свидания.",
+]
+
+
+@pytest.mark.parametrize("lines", [REAL_FINAL_9, REAL_GROUNDING_3], ids=["final_9", "grounding_3"])
+def test_the_two_real_false_failures_no_longer_fail(lines):
+    run = run_with_caller_lines(lines, bookings=[booking(phone=CALLER_ID)])
+
+    assert ok(c.saved_phone_is_the_dictated_number, run)
+    assert ok(c.phone_is("+79161234567"), run)
+
+
+@pytest.mark.parametrize("lines", [REAL_FINAL_9, REAL_GROUNDING_3], ids=["final_9", "grounding_3"])
+def test_but_saving_the_other_number_then_is_wrong(lines):
+    run = run_with_caller_lines(lines, bookings=[booking(phone="+79161234567")])
+
+    assert not ok(c.saved_phone_is_the_dictated_number, run)
+    assert not ok(c.phone_is("+79161234567"), run)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "На номер, с которого я звоню, спасибо.",
+        "На тот же номер, с которого я звонил, 8 916 123 45 67.",
+        "На тот, с которого звоню.",
+        "С которого звоню, на него.",
+        "Да, на этот номер.",  # a real line: the answer to «на этот номер?»
+        "На номер, с которого я звоню, то есть 8 916 123 45 67.",  # real: reads the digits too
+        "Нет, лучше на тот, с которого я звоню, 8 916 123 45 67.",  # real
+        "На этот.",
+        "На мой, пожалуйста.",
+        "Запишите на мой номер.",
+        "С этого номера, да.",
+        "По этому номеру можно.",
+        "Давайте на номер звонящего.",
+        "На номер, с которого я сейчас говорю.",
+        "НА НОМЕР, С КОТОРОГО Я ЗВОНЮ",
+    ],
+)
+def test_phrases_that_choose_the_caller_id(line):
+    assert c.chose_caller_id(run_with_caller_lines(["Мой номер 8 916 123 45 67.", line]))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Нет, на другой номер: 8 916 123 45 67.",
+        "На тот, что я продиктовал.",  # «на тот» alone points at the dictated number
+        "Не на этот номер, а на мой рабочий, 8 495 000 11 22.",
+        "Не с которого звоню, а на номер жены.",
+        # real lines from earlier sweeps that a first version of the check took for a choice:
+        "Нет, на мой номер 8 916 123 45 67.",
+        "Нет, на этот номер не нужно, запишите, пожалуйста, на 8 916 123 45 67.",
+        "На мой номер, 8 916 123 45 67, пожалуйста.",
+        "Нет, этот номер не нужен, запишите на другой.",
+        "На номер, с которого я звоню, не нужно, запишите, пожалуйста, на 8 916 123 45 67.",
+        "На номер, с которого я звоню, не нужен. Запишите, пожалуйста, на 8 916 123 45 67.",
+        "На тот, с которого я звонил, не нужно, запишите на 8 916 123 45 67.",
+        "На номер, с которого я звоню, не нужно, мой телефон 8 916 123 45 67.",
+        "Вы тут все тупые, я хочу скидку 50% на мой автомобиль.",
+        "На мой рабочий, 8 495 000 11 22.",
+        "Запишите на 8 916 123 45 67.",
+        "Тойота Камри.",
+        "Да, всё верно.",
+    ],
+)
+def test_phrases_that_do_not_choose_the_caller_id(line):
+    assert not c.chose_caller_id(run_with_caller_lines(["Запишите на 8 903 555 44 33.", line]))
+
+
+def test_a_later_refusal_of_something_else_does_not_undo_the_choice():
+    lines = ["На номер, с которого я звоню, спасибо.", "Да, всё верно.", "Нет, не нужно, спасибо."]
+    assert c.chose_caller_id(run_with_caller_lines(lines))
+
+
+def test_the_last_word_about_the_number_wins():
+    chose_then_dictated = ["На номер, с которого звоню.", "Нет, лучше на 8 916 123 45 67.", "Да."]
+    dictated_then_chose = ["Запишите на 8 916 123 45 67.", "Хотя нет, на этот номер.", "Да."]
+
+    assert not c.chose_caller_id(run_with_caller_lines(chose_then_dictated))
+    assert c.chose_caller_id(run_with_caller_lines(dictated_then_chose))
+    assert not c.chose_caller_id(run_with_caller_lines([]))
+
+
+def test_a_caller_who_never_chose_the_caller_id_is_checked_as_before():
+    run = run_with_caller_lines(
+        ["Запишите на 8 916 123 45 67."], bookings=[booking(phone=CALLER_ID)]
+    )
+
+    assert not ok(c.saved_phone_is_the_dictated_number, run)
+    assert not ok(c.phone_is("+79161234567"), run)
+
+
+def test_a_choice_without_a_known_caller_id_is_not_trusted():
+    run = run_with_caller_lines(
+        ["Запишите на 8 916 123 45 67.", "На этот номер."],
+        bookings=[booking(phone="+79991234567", caller_phone=None)],
+    )
+
+    assert not ok(c.saved_phone_is_the_dictated_number, run)  # nothing to compare the choice with
+
+
+def test_the_sunday_scenario_passes_with_a_real_choice_of_the_caller_id():
+    scenario = BY_ID["sunday_closed"]
+    run = ideal("sunday_closed")
+    run.caller_lines[:] = REAL_GROUNDING_3
+    run.bookings[:] = [
+        booking(phone=CALLER_ID, preferred_date=date(2026, 9, 28), preferred_time=time(12, 0))
+    ]
+
+    assert [r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed] == []

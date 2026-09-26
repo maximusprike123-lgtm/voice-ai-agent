@@ -211,7 +211,18 @@ turn. **Those two runs (and the two identical ones in the earlier sweeps, `final
 persona says «откажись и назови свой номер») itself says «на номер, с которого я звоню — 8 916…»
 and the check `saved_phone_is_the_dictated_number` compares with the digits it read out.
 So no real «caller ID instead of the dictated number» agent error has been seen since the prompt
-pass; the rule is a safety net proven by offline tests, not by these sweeps. Proposed, NOT done:
-make `saved_phone_is_the_dictated_number` (and `phone_ok` in sunday_closed) skip a run whose
-last caller line about the number says «с которого я звоню».
+pass; the rule is a safety net proven by offline tests, not by these sweeps.
 
+**Fix of the eval artifact (done, 2026-09-26, offline only, no new sweep):** `chose_caller_id(run)` in
+evals/checks.py (the caller's last statement about the number is a choice of the number they call
+from). `saved_phone_is_the_dictated_number` then expects the caller ID, and `phone_is()` (the
+`phone_ok` check of every scenario, not only sunday_closed) expects the caller ID too. STRONG phrases
+(«с которого я звоню», «на номер звонящего») count even when the same line reads out digits; WEAK
+ones («на этот», «на мой», «с этого номера», «на тот же») only when no number is dictated in the line
+(«Нет, на мой номер 8 916…» dictates); a refusal wins («не на этот», «на этот номер не нужно», «на номер,
+с которого я звоню, не нужен, запишите на 8 916…»); «на тот» alone is not a choice. A first, simpler
+version was tried on the 560 saved runs (`data/evals/*/results.json`) and produced four kinds of false
+matches, each now a test; the final version flags 10 runs, all real choices. The tests use the caller
+lines of the two earlier false failures (`final_new10` sunday_closed #9, `grounding10` #3). Runs whose
+caller last chose the caller ID but where the agent saved another number still fail. Earlier sweep
+numbers above are as originally graded (the failed checks are not re-graded in results.json).

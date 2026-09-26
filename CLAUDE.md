@@ -66,7 +66,8 @@ with a measured result: **95/99 = 96%** raw pass rate, 10 runs per scenario (old
 see docs/evals.md). ~1080 offline tests. Post-tag follow-ups are done, and so are **step 1.11**
 (role leakage drops the round's tool calls; tools refuse a phone/name the caller never said) and
 **step 1.12** (the caller ID is refused once when another number was dictated; new eval scenario
-`dictates_other_number`); details and sweeps in docs/.
+`dictates_other_number`; the false failures of the phone checks fixed offline); details in docs/.
+**Step 1 is closed for good; step 2 is next.**
 
 Code map: `src/agent/{dialogue,session,app,cli,tools,grounding,records,storage,notifier,text_guard,
 ru_words,prompt,llm,settings,business}.py`, `evals/`, `scripts/`, `config/business.yaml`.
@@ -92,8 +93,6 @@ adds `call_id` as SQLite migration 2, and `mark_spoken`).
   (13%); hidden-ID «этот номер» offer 1/10.
 - **Together stalls on the first token in ~7% of requests, and the engine's retry goes to the same
   provider** (details in docs/open-issues.md); step 2 idea: retry via Fireworks. Not done.
-- **Eval artifact:** `saved_phone_is_the_dictated_number` fails when the simulated caller itself chooses
-  «с которого я звоню» (sunday_closed, ~1/10); fix proposed, not done (docs/evals.md, Step 1.12).
 - **Foreign-script chars** (Chinese on qwen3.5): `foreign_script_chars()` guard exists in the
   speech guard; step 2 must decide behavior before TTS.
 - **Conversation-level rule compliance** is model-dependent; run several evals, not one dialogue.

@@ -191,16 +191,64 @@ def dictated_numbers(run: RunResult) -> list[str]:
     return numbers
 
 
+# The caller picks the number they are calling from. STRONG phrases name the calling number
+# outright («на номер, с которого я звоню»): a choice even when the same line also reads out digits
+# (a simulated caller does that: «На тот же номер, с которого я звонил, 8 916…»). WEAK phrases
+# («на этот», «на мой», «с этого номера») are a choice only when no number is dictated in the same
+# line: «Нет, на мой номер 8 916 123 45 67» dictates one. «На тот» alone is not a choice either.
+_CALLER_ID_STRONG = re.compile(
+    r"с\s+которого\s+(?:я\s+)?(?:сейчас\s+)?(?:звон|говор)|на\s+номер\s+звонящего", re.I
+)
+_CALLER_ID_WEAK = re.compile(
+    r"с\s+(?:этого|моего|текущего)\s+(?:номера|телефона)"
+    r"|на\s+(?:этот|текущий)\b"
+    r"|на\s+мой\b(?=\s*(?:номер|телефон|[,.!?]|$))"
+    r"|на\s+тот\s+же\b|по\s+этому\s+номеру",
+    re.I,
+)
+# «Не на этот номер», «не с которого звоню», «на этот номер не нужно», «на номер, с которого я
+# звоню, не нужен»: the opposite of a choice.
+_CALLER_ID_REFUSAL = re.compile(
+    r"\bне\s+(?:на\s+|с\s+)?(?:этот|этого|мой|моего|текущий|тот,?\s+с\s+которого|с\s+которого)"
+    r"|(?:номер\w*|тот|этот|этого|звон\w*|которого)[^.!?]{0,25}не\s+(?:нуж\w*|надо|подходит)",
+    re.I,
+)
+
+
+def chose_caller_id(run: RunResult) -> bool:
+    """Did the caller, the last time they spoke about the number, choose the number they call
+    from? Looks at the caller's lines from the end: a line that refuses it, or dictates a number
+    without naming the calling number outright, settles it as «no»; a line that chooses it
+    settles it as «yes»; lines that say nothing about the number are skipped."""
+    for line in reversed(run.caller_lines):
+        if _CALLER_ID_REFUSAL.search(line):
+            return False
+        if _CALLER_ID_STRONG.search(line):
+            return True
+        dictates = _gives_number(line)
+        if _CALLER_ID_WEAK.search(line) and not dictates:
+            return True
+        if dictates:
+            return False
+    return False
+
+
 @named("saved_phone_is_the_dictated_number")
 def saved_phone_is_the_dictated_number(run: RunResult, ctx: CheckContext) -> CheckResult:
     """If the caller dictated a phone number, that is the one that must be saved (not the number
-    they called from). Nothing to check without a booking or a dictated number."""
+    they called from), unless the caller then chose the number they call from: then that one is
+    right. Nothing to check without a booking or a dictated number."""
     name = "saved_phone_is_the_dictated_number"
     numbers = dictated_numbers(run)
     if not numbers or not run.bookings:
         return result(name, True)
     dictated = numbers[-1]
-    wrong = [b.phone for b in run.bookings if b.phone != dictated]
+    chose_own = chose_caller_id(run)
+    wrong = [
+        b.phone
+        for b in run.bookings
+        if b.phone != (b.caller_phone if chose_own and b.caller_phone else dictated)
+    ]
     return result(name, not wrong, f"the caller dictated {dictated} but {wrong} was saved")
 
 
@@ -355,7 +403,22 @@ def notes_match(pattern: str) -> Check:
 
 
 def phone_is(e164: str) -> Check:
-    return booking_field("phone_ok", lambda b: b.phone == e164, f"phone should be {e164}")
+    """The saved phone is `e164`, or the caller ID if the caller last chose the number they call
+    from (see `chose_caller_id`)."""
+
+    @named("phone_ok")
+    def check(run: RunResult, ctx: CheckContext) -> CheckResult:
+        if not run.bookings:
+            return result("phone_ok", False, "no booking was saved")
+        booking = run.bookings[-1]
+        expected = booking.caller_phone if chose_caller_id(run) and booking.caller_phone else e164
+        return result(
+            "phone_ok",
+            booking.phone == expected,
+            f"phone should be {expected}; got {_summary(booking)}",
+        )
+
+    return check
 
 
 def caller_phone_is(value: str | None) -> Check:
