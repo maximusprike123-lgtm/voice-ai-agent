@@ -365,3 +365,14 @@ def test_the_correction_note_quotes_each_blocked_sentence_once_per_rule():
     assert "«Заявка принята.»" in note and "«Номер 89161234567.»" in note
     assert "Ваша заявка передана" not in note
     assert "confirm_booking" in note and "prepare_booking" in note  # tells the model what to do
+
+
+def test_the_correction_note_says_when_the_tool_calls_were_dropped():
+    violations = [Violation("role_leakage", "userМеня зовут Дмитрий.")]
+
+    plain = correction_note(violations)
+    dropped = correction_note(violations, calls_dropped=True)
+
+    assert "отменены" not in plain
+    assert dropped.startswith(plain) and "отменены и НЕ выполнены" in dropped
+    assert "Не выдумывай данные клиента" in dropped

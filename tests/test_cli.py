@@ -270,7 +270,7 @@ async def test_the_reader_is_prompted_for_each_line(tmp_path):
 async def test_full_booking_reads_back_saves_and_shows_the_record(tmp_path):
     out, _ = await call_cli(
         tmp_path,
-        ["Запишите меня", "Да, всё верно", "Нет, спасибо"],
+        ["Меня зовут Игорь, номер 8 916 123 45 67", "Да, всё верно", "Нет, спасибо"],
         tool_round("prepare_booking", BOOKING_ARGS),
         tool_round("confirm_booking"),
         tool_round("end_call"),
@@ -301,7 +301,7 @@ async def test_full_booking_reads_back_saves_and_shows_the_record(tmp_path):
 async def test_show_tools_prints_calls_results_and_timings(tmp_path):
     out, _ = await call_cli(
         tmp_path,
-        ["Запишите меня"],
+        ["Меня зовут Игорь, номер 8 916 123 45 67"],
         tool_round("prepare_booking", BOOKING_ARGS),
         opts=options(show_tools=True),
     )
@@ -314,7 +314,9 @@ async def test_show_tools_prints_calls_results_and_timings(tmp_path):
 
 async def test_tool_details_are_hidden_without_show_tools(tmp_path):
     out, _ = await call_cli(
-        tmp_path, ["Запишите меня"], tool_round("prepare_booking", BOOKING_ARGS)
+        tmp_path,
+        ["Меня зовут Игорь, номер 8 916 123 45 67"],
+        tool_round("prepare_booking", BOOKING_ARGS),
     )
 
     joined = "\n".join(out)
@@ -373,7 +375,7 @@ async def test_notify_off_never_touches_the_notifier(tmp_path):
     notifier = FakeNotifier()
     await call_cli(
         tmp_path,
-        ["Запишите меня", "Да"],
+        ["Меня зовут Игорь, номер 8 916 123 45 67", "Да"],
         tool_round("prepare_booking", BOOKING_ARGS),
         tool_round("confirm_booking"),
         text("Готово."),
@@ -386,7 +388,7 @@ async def test_notify_delivers_and_waits_for_delivery_before_exiting(tmp_path):
     notifier = FakeNotifier()
     out, _ = await call_cli(
         tmp_path,
-        ["Запишите меня", "Да"],
+        ["Меня зовут Игорь, номер 8 916 123 45 67", "Да"],
         tool_round("prepare_booking", BOOKING_ARGS),
         tool_round("confirm_booking"),
         text("Готово."),
@@ -428,7 +430,7 @@ async def test_undeliverable_notifications_are_reported_and_stay_in_the_database
     )
     out, _ = await call_cli(
         tmp_path,
-        ["Запишите меня", "Да"],
+        ["Меня зовут Игорь, номер 8 916 123 45 67", "Да"],
         tool_round("prepare_booking", BOOKING_ARGS),
         tool_round("confirm_booking"),
         text("Готово."),

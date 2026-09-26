@@ -11,6 +11,7 @@ from agent.ru_words import (
     longest_number_run,
     plural_form,
     spoken_amounts,
+    spoken_digits,
     time_words,
 )
 
@@ -212,3 +213,34 @@ def test_longest_number_run_separates_phone_dictation_from_normal_numbers(text, 
 
 def test_a_read_back_run_stays_below_the_phone_threshold():
     assert longest_number_run("Номер телефона заканчивается на четыре пять шесть семь.") < 6
+
+
+# --- spoken_digits ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "digits"),
+    [
+        ("8 (916) 123-45-67", "89161234567"),
+        ("плюс 7 916 123 45 67", "79161234567"),
+        ("восемь девять один шесть один два три четыре пять шесть семь", "89161234567"),
+        ("восемь девятьсот шестнадцать сто двадцать три сорок пять шестьдесят семь", "89161234567"),
+        ("девятьсот пять", "905"),
+        ("девятьсот десять", "910"),
+        ("двадцать два ноль ноль", "2200"),
+        ("девять шестнадцать", "916"),
+        ("Меня зовут Игорь, номер 916 123 45 67, спасибо", "9161234567"),
+        ("восемь девятьсот шестнадцать, сто двадцать три", "8916123"),  # commas do not matter
+        ("нет цифр", ""),
+        ("", ""),
+    ],
+)
+def test_spoken_digits(text, digits):
+    assert spoken_digits(text) == digits
+
+
+def test_spoken_digits_does_not_glue_numerals_that_cannot_belong_together():
+    # «сорок» + «двадцать»: two tens are two numbers; «пять» closes a group of units
+    assert spoken_digits("сорок двадцать") == "4020"
+    assert spoken_digits("пять пять") == "55"
+    assert spoken_digits("сто двести") == "100200"

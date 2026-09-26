@@ -13,13 +13,14 @@ class Item:
     """One thing that happened in a call, in order."""
 
     turn: int  # 0 = the greeting, 1.. = the caller's utterances
-    kind: str  # "say" | "tool" | "failed" | "end" | "blocked"
+    kind: str  # "say" | "tool" | "failed" | "end" | "blocked" | "dropped"
     text: str = ""  # say: the sentence; tool: its result; failed: the reason
     tool: str = ""
     args: dict = field(default_factory=dict)
     committed: bool = False
     is_error: bool = False
-    rule: str = ""  # for "blocked": which speech-guard rule stopped the sentence
+    rule: str = ""  # "blocked": the speech-guard rule that stopped the sentence; "dropped": why
+    # (text of a "dropped" item = the names of the tool calls thrown away)
 
 
 @dataclass

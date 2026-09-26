@@ -353,3 +353,57 @@ def longest_number_run(text: str) -> int:
         if raw.endswith((".", "!", "?")):
             run = 0  # a sentence ends the run
     return longest
+
+
+_WORD_OR_DIGITS_RE = re.compile(r"\d+|[а-яёА-ЯЁ]+")
+
+
+def spoken_digits(text: str) -> str:
+    """The digits a person said in `text`, as one string. Written digits are kept as they are;
+    number words are turned into digits, with the way numbers are dictated in Russian: single
+    digits ('восемь девять один' -> '891') and groups of hundreds, tens and units
+    ('девятьсот шестнадцать' -> '916', 'сорок пять' -> '45', 'девятьсот пять' -> '905').
+    Everything else is skipped, and separators do not matter ('+7 (916) 123-45-67' ->
+    '79161234567'). Not understood: colloquial forms such as «двойка» or «две девятки»."""
+    out: list[str] = []
+    group: int | None = None  # the numeral being built: hundreds, then tens/teens, then units
+    last_kind = ""
+
+    def flush() -> None:
+        nonlocal group, last_kind
+        if group is not None:
+            out.append(str(group))
+        group, last_kind = None, ""
+
+    for token in _WORD_OR_DIGITS_RE.findall(text):
+        if token.isdigit():
+            flush()
+            out.append(token)
+            continue
+        value = _NUMBER_WORDS.get(_norm(token))
+        if value is None:
+            flush()
+        elif value == 0:
+            flush()
+            out.append("0")
+        else:
+            kind = (
+                "unit"
+                if value < 10
+                else "teen"
+                if value < 20
+                else "tens"
+                if value < 100
+                else "hundreds"
+            )
+            can_extend = (
+                (kind == "hundreds" and group is None)
+                or (kind in ("tens", "teen") and last_kind == "hundreds")
+                or (kind == "unit" and last_kind in ("hundreds", "tens"))
+            )
+            if not can_extend:
+                flush()
+            group = (group or 0) + value
+            last_kind = kind
+    flush()
+    return "".join(out)

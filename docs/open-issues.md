@@ -71,13 +71,21 @@ routing, guardrails, infra noise) are in [latency.md](latency.md). Eval history 
   (`saved_phone_is_the_dictated_number`); it is only checked in evals, nothing enforces it in
   code (idea: when the caller dictated digits, validate `prepare_booking`'s phone against the
   digits heard, which needs the raw caller text in the tool layer). (5) **Two eval checks were too strict (fixed 2026-09-26, see the follow-ups).**
-  (6) **Role leakage is now blocked in speech, but NOT in tool calls:** when the model writes the
-  caller's line into its reply («userМеня зовут Дмитрий.») it has usually built the rest of that
-  reply, including tool calls, on invented data; in the recorded case a fabricated name and phone
-  were saved through `take_message`. The guard drops the sentence, yet a tool call in the same
-  reply still runs. Proposed, NOT done: on `role_leakage` also discard that round's tool calls and
-  run the corrective round (a design change: needs approval). More generally, nothing checks that
-  `name` / `phone` in `prepare_booking` / `take_message` were actually said by the caller.
+  (6) **Role leakage and made-up caller data: DONE in step 1.11 (2026-09-26).** On `role_leakage` the
+  engine stops reading the reply, drops ALL tool calls of that round (`ToolCallsDropped`, only when
+  a call had already been read; otherwise the closed stream never shows it) and runs a corrective
+  round; a second leak speaks «Давайте продолжим.» with no tools. Independently of leaks the tools
+  refuse data the caller never said (`agent.grounding.CallerSpeech`, fed by `begin_turn(user_text)`):
+  a phone (digits found in the caller's words, in digits or number words, also dictated in pieces;
+  the caller ID counts as said) in `prepare_booking` and `take_message` → «ОШИБКА»; a name in
+  `prepare_booking` is refused ONCE (accepted on the same name after the caller spoke again, so
+  «Дима» → «Дмитрий» costs one turn), in `take_message` it is dropped (`name=None`, warning). Limits:
+  colloquial numerals («двойка», «две девятки») are not understood; the name match has no
+  diminutive dictionary; `car`, `service_id`, dates are still not checked (the read-back is the
+  net). Not measured by the scenarios (they never fired, see evals.md).
+  **Still open, planned as its own step with its own sweep (step (б)):** the model passes the caller ID
+  although the caller dictated another number (`saved_phone_is_the_dictated_number`, 1/10 runs in
+  both sweeps). Idea: refuse the caller ID once when a full different number was dictated.
   (7) `acceptance_claim` never fired in the 200 runs of the final comparison
   (it happened once in ~250 earlier): rare but the guard covers it.
 - **Background-process gotcha for long sweeps in this environment:** a sweep started with a

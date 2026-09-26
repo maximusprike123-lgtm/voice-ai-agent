@@ -7,8 +7,14 @@ draft; the model calls it only after the caller says yes.
 
 `ToolRegistry` implements the `ToolExecutor` protocol of DialogueEngine. Validation problems
 are returned to the model as a result text starting with "ОШИБКА:" (never raised), so it can
-ask the caller again. The tool schemas are static: nothing in them depends on the caller, the
-time or the call, so they never break a backend's prompt-prefix cache.
+ask the caller again.
+
+Grounding: the registry hears every caller utterance (begin_turn) and refuses a phone number the
+caller never said (the caller ID counts as said) and, once, a name the caller never said, so
+data the model made up cannot be saved (see agent.grounding).
+
+The tool schemas are static: nothing in them depends on the caller, the time or the call, so
+they never break a backend's prompt-prefix cache.
 """
 
 import json
@@ -21,6 +27,7 @@ from typing import Any
 
 from agent.business import OTHER_SERVICE_ID, BusinessConfig, Weekday
 from agent.dialogue import ToolOutcome
+from agent.grounding import CallerSpeech
 from agent.llm import ToolCall, ToolSpec
 from agent.prompt import format_hours
 from agent.records import Booking, CallbackMessage, RecordSink
@@ -200,6 +207,8 @@ class ToolRegistry:
         self._submitted: set[tuple] = set()
         self._turn = 0  # counts caller utterances (see begin_turn)
         self._confirmed_in_turn: int | None = None  # turn of the last accepted booking
+        self._heard = CallerSpeech()  # what the caller has said in this call
+        self._name_challenge: tuple[str, int] | None = None  # (name, turn) refused once
         self.specs = build_tool_specs(business)
         self._handlers = {
             "prepare_booking": self._prepare_booking,
@@ -208,8 +217,9 @@ class ToolRegistry:
             "end_call": self._end_call,
         }
 
-    def begin_turn(self) -> None:
+    def begin_turn(self, user_text: str = "") -> None:
         self._turn += 1
+        self._heard.add(user_text)
 
     def _now(self) -> datetime:
         now = self._clock()
@@ -237,10 +247,13 @@ class ToolRegistry:
         # just changed something, so the old draft is stale either way.
         self._draft = None
         fields, problems = _validate_booking(args, self._now(), self._business)
-        if fields is None:
+        if fields is not None:
+            problems = self._ungrounded(fields)
+        if problems:
             return _error(
                 "заявка НЕ подготовлена. Исправь и вызови снова:\n- " + "\n- ".join(problems)
             )
+        assert fields is not None
 
         self._draft = args  # replaces any earlier draft
         self._draft_turn = self._turn
@@ -252,6 +265,46 @@ class ToolRegistry:
             ),
             say=_read_back(fields),
         )
+
+    def _phone_was_said(self, phone: str) -> bool:
+        """The caller said this number, or it is the caller ID (which comes from the network,
+        so the model cannot have made it up)."""
+        if self._caller_phone and normalize_phone(phone) == normalize_phone(self._caller_phone):
+            return True
+        return self._heard.said_phone(phone)
+
+    def _phone_not_said(self) -> str:
+        offer = (
+            " или предложи записать на номер, с которого он звонит"
+            if self._caller_phone
+            else " (номер звонящего не определён, нужен только номер, который он продиктует)"
+        )
+        return (
+            "phone: клиент не называл этот номер. Не придумывай номер. Спроси у клиента, на "
+            f"какой номер записать: попроси продиктовать его{offer}."
+        )
+
+    def _ungrounded(self, fields: _Fields) -> list[str]:
+        """Problems with data the caller never said: an empty list if there are none."""
+        problems = []
+        if not self._phone_was_said(fields.phone):
+            logger.warning("prepare_booking refused: the phone was never said by the caller")
+            problems.append(self._phone_not_said())
+        if not self._heard.said_name(fields.name):
+            key = fields.name.casefold()
+            challenged = self._name_challenge
+            if challenged is not None and challenged[0] == key and challenged[1] < self._turn:
+                # Refused once already and the caller has spoken since: they may have said a
+                # short form («Дима» for «Дмитрий»), so let it through.
+                logger.warning("name %r never said by the caller; accepted on retry", fields.name)
+            else:
+                self._name_challenge = (key, self._turn)
+                problems.append(
+                    f"name: клиент не называл имя {fields.name!r}. Не придумывай имя. Спроси у "
+                    "клиента, как его зовут, и вызови prepare_booking снова с тем именем, "
+                    "которое он назовёт."
+                )
+        return problems
 
     async def _confirm_booking(self, args: dict[str, Any]) -> ToolOutcome:
         if self._draft is None:
@@ -350,6 +403,16 @@ class ToolRegistry:
             return _error(
                 "сообщение НЕ передано. Исправь и вызови снова:\n- " + "\n- ".join(problems)
             )
+
+        if raw_phone and not self._phone_was_said(raw_phone):
+            logger.warning("take_message refused: the phone was never said by the caller")
+            return _error(
+                "сообщение НЕ передано. Исправь и вызови снова:\n- " + self._phone_not_said()
+            )
+        if name and not self._heard.said_name(name):
+            # The name is optional and the message matters more: save it without the name.
+            logger.warning("take_message: name %r never said by the caller, dropped", name)
+            name = None
 
         phone = normalize_phone(raw_phone) if raw_phone else None
         if raw_phone and phone is None:

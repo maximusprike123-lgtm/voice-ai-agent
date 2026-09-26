@@ -219,3 +219,22 @@ from the production VPS.
 
 **Remaining roadmap:** step 2 (STT/TTS, local mic) and step 3 (Asterisk + AudioSocket on the
 real VPS).
+
+## Step 1.11 (2026-09-26): grounding of caller data, before step 2
+
+Problem: the model can write the caller's line into its reply («userМеня зовут Дмитрий») and call a
+tool with a made-up name and phone in the same reply; the speech guard dropped the sentence but the
+call still ran (once a fabricated name+phone was saved through `take_message`). Decisions:
+(1) `role_leakage` is a tripwire for the whole round: stop reading the stream at the first such
+sentence, discard every tool call, one corrective round with a hidden note («вызовы отменены, не
+выдумывай данные клиента»), sentences the caller already heard stay in the history, a second leak →
+neutral fallback and no tools (`DialogueEngine.respond`, event `ToolCallsDropped`, shown by the CLI
+and the eval harness as an item of kind `dropped`). Other guard rules keep their tool calls.
+(2) The real guarantee does not depend on leaks: `ToolExecutor.begin_turn(user_text)` now gets the
+caller's words and `ToolRegistry` checks them (`src/agent/grounding.py`, `ru_words.spoken_digits`):
+phone must occur in the caller's digits (or equal the caller ID), otherwise «ОШИБКА» that tells the
+model to ask the caller; the name is refused once. `take_message` never loses a message over a name.
+(3) Not done, on purpose: the dictated-number-vs-caller-ID conflict (own step and sweep), checks of
+`car`/`service`/dates. Tests: `tests/test_grounding.py`, new cases in test_tools / test_dialogue /
+test_ru_words / test_text_guard; existing tests now feed the caller's words to the registry.
+

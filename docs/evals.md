@@ -169,3 +169,23 @@ before: spoken); `acceptance_claim` 0 → 0; `foreign_script` 0 → 0. **No full
 happened, so the corrective round never ran in the sweeps** (it is covered by tests and by the live probe).
 Warning `own_recap_before_prepare` 39 → 13 per 100 runs (the prompt cut it by two thirds, not to 0).
 Caller side: 3 markers ignored, 11 goodbyes deferred (new); 2 / 9 (ref).
+
+## Grounding sweep (2026-09-26, step 1.11)
+
+`python -m evals --runs 10 --out data/evals/grounding10` after step 1.11 (role leakage drops the
+round's tool calls; the tools refuse a phone number / name the caller never said). Compared with the
+final sweep (`python -m evals.compare data/evals/final_new10 data/evals/grounding10`). Cost $0.583.
+Raw pass rate **84/87 = 97%** (final: 95/99 = 96%); **13 of 100 runs were infra errors** (final: 1), all
+`no first LLM output for 4.0s`, 12 of them in the first runs of a scenario at the start of the
+sweep: Together stalled on 33 of 468 agent requests (7%, max 27s). That is the known provider tail
+(docs/latency.md), not the change (no tool ran in those rounds), but it makes n = 87 instead of 99.
+The three real failures: `service_not_listed` #1 (a message instead of a booking, known),
+`question_outside_faq` #7 (the caller declined the offered message, the model did not save one),
+`sunday_closed` #3 (saved the caller ID instead of the dictated number: the known issue, step (б) of
+the plan, not done yet). **The new checks never fired in the sweep:** 0 refused phones/names, 0
+`ToolCallsDropped`, 0 `role_leakage` blocks in 87 gradable runs (the final sweep had none either), so
+the sweep shows no regression and no gain: the simulated caller always dictates the number and the
+name, and the model does not invent them. The protection is covered by offline tests (~1050), not by
+these scenarios. Guard blocks: `written_down` 6 → 11 per 87 runs (same rate, all blocked),
+`acceptance_claim` 0 → 1. Warning `own_recap_before_prepare` 13 → 20 per 100 (noise at this n).
+

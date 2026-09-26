@@ -132,7 +132,7 @@ async def test_notify_wires_the_notifying_sink_and_delivers_in_the_background(tm
     ) as runtime:
         assert isinstance(runtime.sink, NotifyingSink)
         session = runtime.new_call("+79991234567")
-        [e async for e in session.handle("Запишите меня")]
+        [e async for e in session.handle("Меня зовут Игорь, номер 8 916 123 45 67")]
         [e async for e in session.handle("Да, всё верно")]
 
         await wait_until(lambda: notifier.sent)
@@ -225,7 +225,7 @@ async def test_the_caller_id_and_clock_reach_the_saved_booking(tmp_path):
     )
     async with open_runtime(make_settings(tmp_path), llm=llm, clock=lambda: NOW) as runtime:
         session = runtime.new_call("+79991234567")
-        [e async for e in session.handle("Запишите")]
+        [e async for e in session.handle("Меня зовут Игорь, номер 8 916 123 45 67")]
         [e async for e in session.handle("Да")]
         [stored] = await runtime.store.list_bookings()
 

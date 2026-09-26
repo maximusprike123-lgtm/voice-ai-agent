@@ -15,6 +15,7 @@ from agent.dialogue import (
     Say,
     SentenceBlocked,
     SentenceSplitter,
+    ToolCallsDropped,
     ToolOutcome,
     ToolResult,
 )
@@ -72,7 +73,7 @@ class FakeTools:
         self.executed: list[ToolCall] = []
         self.turns_begun = 0
 
-    def begin_turn(self) -> None:
+    def begin_turn(self, user_text: str) -> None:
         self.turns_begun += 1
 
     async def execute(self, call: ToolCall) -> ToolOutcome:
@@ -316,8 +317,8 @@ async def test_begin_turn_is_called_once_per_caller_utterance_before_tools_run()
     order = []
 
     class RecordingTools(FakeTools):
-        def begin_turn(self):
-            super().begin_turn()
+        def begin_turn(self, user_text):
+            super().begin_turn(user_text)
             order.append("begin_turn")
 
         async def execute(self, call):
@@ -925,3 +926,142 @@ async def test_cancelling_during_a_blocked_reply_keeps_only_what_was_spoken():
     await gen.aclose()
 
     assert engine.messages[-1] == Message(Role.ASSISTANT, "Как вас зовут?")
+
+
+# --- Role leakage: the round's tool calls are thrown away ---------------------------------------
+
+LEAK = "userМеня зовут Дмитрий."
+SAVE = ToolCall("c1", "take_message", '{"message": "x", "name": "Дмитрий", "phone": "89161234567"}')
+
+
+async def test_role_leakage_drops_the_tool_calls_and_asks_the_model_again():
+    engine, llm, tools = make_engine(
+        tool_turn(SAVE, before=f"{LEAK} Записываю."), text("Как вас зовут?")
+    )
+
+    events = await collect(engine, "Перезвоните мне")
+
+    assert tools.executed == []
+    # The stream was closed at the leak, so the calls after it were never even read.
+    assert events == [SentenceBlocked("role_leakage", LEAK), Say("Как вас зовут?")]
+    assert len(llm.calls) == 2
+    note = llm.calls[1][-1]
+    assert note.role is Role.SYSTEM and "отменены" in note.content and LEAK in note.content
+
+
+async def test_the_dropped_calls_never_reach_the_history():
+    engine, _, _ = make_engine(tool_turn(SAVE, before=LEAK), text("Как вас зовут?"))
+
+    await collect(engine, "Перезвоните мне")
+
+    assert engine.messages[1:] == [
+        Message(Role.USER, "Перезвоните мне"),
+        Message(Role.ASSISTANT, "Как вас зовут?"),
+    ]  # no tool call, no leaked sentence, no tool result without a call
+
+
+async def test_a_tool_call_that_came_before_the_leaked_text_is_dropped_too():
+    engine, _, tools = make_engine(
+        [ToolCallEvent(SAVE), TextDelta("user: Дмитрий"), StreamEnd("tool_calls")],  # unterminated
+        text("Как вас зовут?"),
+    )
+
+    events = await collect(engine, "x")
+
+    assert tools.executed == [] and Say("Как вас зовут?") in events
+    assert ToolCallsDropped("role_leakage", ("take_message",)) in events
+
+
+async def test_reading_stops_at_the_first_leaked_sentence():
+    engine, llm, tools = make_engine(
+        [TextDelta(f"{LEAK} Ещё фраза. "), ToolCallEvent(SAVE), StreamEnd("tool_calls")],
+        text("Как вас зовут?"),
+    )
+
+    events = await collect(engine, "x")
+
+    assert Say("Ещё фраза.") not in events and tools.executed == []
+    assert llm.closed == 2  # the first stream was closed, not drained
+
+
+async def test_what_the_caller_heard_before_the_leak_stays_in_the_history():
+    engine, llm, _ = make_engine(text(f"Хорошо. {LEAK}"), text("Как вас зовут?"))
+
+    events = await collect(engine, "x")
+
+    assert events[0] == Say("Хорошо.")
+    assert engine.messages[-1] == Message(Role.ASSISTANT, "Хорошо. Как вас зовут?")
+    retry = llm.calls[1]
+    assert retry[-2] == Message(Role.ASSISTANT, "Хорошо.") and retry[-1].role is Role.SYSTEM
+
+
+async def test_a_tool_call_of_the_corrective_round_runs():
+    engine, _, tools = make_engine(
+        tool_turn(SAVE, before=LEAK), tool_turn(ToolCall("c2", "end_call", "{}")), text("Пока.")
+    )
+
+    await collect(engine, "x")
+
+    assert [c.name for c in tools.executed] == ["end_call"]
+
+
+async def test_two_leaks_in_a_row_drop_the_calls_again_and_speak_the_fallback():
+    engine, llm, tools = make_engine(tool_turn(SAVE, before=LEAK), tool_turn(SAVE, before=LEAK))
+
+    events = await collect(engine, "x")
+
+    assert tools.executed == [] and len(llm.calls) == 2
+    assert [type(e) for e in events] == [
+        SentenceBlocked,
+        ToolCallsDropped,  # here the tool call had already been read when the leak was found
+        SentenceBlocked,
+        ToolCallsDropped,
+        Say,
+    ]
+    assert events[-1] == Say(GUARD_FALLBACKS["role_leakage"])
+    assert engine.messages[-1] == Message(Role.ASSISTANT, GUARD_FALLBACKS["role_leakage"])
+
+
+async def test_a_leak_without_tool_calls_emits_no_dropped_event():
+    engine, _, _ = make_engine(text(LEAK), text("Как вас зовут?"))
+
+    events = await collect(engine, "x")
+
+    assert not any(isinstance(e, ToolCallsDropped) for e in events)
+
+
+async def test_a_leak_after_a_tool_round_is_handled_in_that_round_too():
+    engine, _, tools = make_engine(
+        tool_turn(ToolCall("c0", "lookup", "{}")),
+        tool_turn(SAVE, before=LEAK),
+        text("Как вас зовут?"),
+    )
+
+    events = await collect(engine, "x")
+
+    assert [c.name for c in tools.executed] == ["lookup"]  # not take_message
+    assert events[-1] == Say("Как вас зовут?")
+
+
+async def test_other_guard_rules_still_let_the_tool_calls_run():
+    engine, _, tools = make_engine(tool_turn(SAVE, before="Хорошо, записал."), text("Готово."))
+
+    events = await collect(engine, "x")
+
+    assert [c.name for c in tools.executed] == ["take_message"]
+    assert not any(isinstance(e, ToolCallsDropped) for e in events)
+
+
+async def test_the_engine_passes_the_callers_words_to_the_tools():
+    seen = []
+
+    class Hearing(FakeTools):
+        def begin_turn(self, user_text):
+            seen.append(user_text)
+
+    engine, _, _ = make_engine(text("Слушаю."), text("Хорошо."), tools=Hearing())
+
+    await collect(engine, "Меня зовут Игорь")
+    await collect(engine, "Да")
+
+    assert seen == ["Меня зовут Игорь", "Да"]

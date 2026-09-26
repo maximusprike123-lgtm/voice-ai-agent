@@ -10,6 +10,12 @@ history as spoken text. Only if that leaves the whole reply silent (no sentence,
 is the model asked once more with a hidden correction note; if that fails too, a neutral
 fallback sentence is spoken. Sentences written by code (ToolOutcome.say) are not checked.
 
+Role leakage (the model writes the caller's line or a role label into its reply) is stricter:
+the reply is built on invented data, so reading stops at the first such sentence, ALL tool
+calls of that round are thrown away (ToolCallsDropped), and the model is asked once more with a
+hidden note. Sentences the caller already heard stay in the history. If the second attempt
+leaks again, its tool calls are dropped too and a neutral fallback is spoken.
+
 Cancellation (barge-in): `respond()` is an async generator. Cancelling the task that consumes
 it, or calling `aclose()` on it, stops the LLM stream and leaves the history consistent (no
 tool call without a result). Sentences already emitted stay in the history as the assistant's
@@ -35,6 +41,8 @@ from agent.llm import (
     ToolSpec,
 )
 from agent.text_guard import SpeechGuard, Violation, correction_note, fallback_sentence
+
+ROLE_LEAKAGE_RULE = "role_leakage"
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +101,15 @@ class SentenceBlocked:
     text: str
 
 
-DialogueEvent = Say | ToolResult | EndCall | SentenceBlocked
+@dataclass(frozen=True)
+class ToolCallsDropped:
+    """Not executed: the round's tool calls were thrown away because of a guard rule."""
+
+    rule: str
+    tools: tuple[str, ...]
+
+
+DialogueEvent = Say | ToolResult | EndCall | SentenceBlocked | ToolCallsDropped
 
 
 # --- Tools (implemented in step 1.6) ----------------------------------------------------------
@@ -114,9 +130,10 @@ class ToolOutcome:
 class ToolExecutor(Protocol):
     specs: list[ToolSpec]
 
-    def begin_turn(self) -> None:
-        """Called once per caller utterance, before any tool of that turn runs. Lets a tool
-        tell "in the same turn" from "after the caller spoke again"."""
+    def begin_turn(self, user_text: str) -> None:
+        """Called once per caller utterance, before any tool of that turn runs, with what the
+        caller said. Lets a tool tell "in the same turn" from "after the caller spoke again",
+        and check that data the model passes was really said."""
         ...
 
     async def execute(self, call: ToolCall) -> ToolOutcome:
@@ -223,28 +240,33 @@ class DialogueEngine:
         Raises LLMError if the backend still fails. If that happens in the first round, the
         user message is dropped from the history, so the caller can simply repeat themselves.
         """
-        self._tools.begin_turn()
+        self._tools.begin_turn(user_text)
         checkpoint = len(self._messages)
         self._messages.append(Message(Role.USER, user_text))
 
         for round_index in range(MAX_LLM_ROUNDS):
             correction: Message | None = None  # hidden note for a corrective round; not kept
             first_blocked: list[Violation] = []
+            carried: list[str] = []  # heard in an earlier attempt of this round (role leakage)
             for attempt in (1, 2):
                 spoken: list[str] = []
                 calls: list[ToolCall] = []
                 blocked: list[Violation] = []
+                leaked = False  # a role-leakage sentence was found in this attempt
                 splitter = SentenceSplitter()
                 specs = self._tools.specs or None
                 started = False  # did the LLM send anything at all?
                 failure: LLMError | None = None
                 retryable = True
-                messages = self._messages if correction is None else [*self._messages, correction]
+                messages = self._messages
+                if correction is not None:
+                    heard = [Message(Role.ASSISTANT, " ".join(carried))] if carried else []
+                    messages = [*self._messages, *heard, correction]
 
                 try:
                     async with aclosing(self._llm.stream(messages, specs)) as stream:
                         events = aiter(stream)
-                        while True:
+                        while not leaked:
                             timeout = self._event_timeout if started else self._first_event_timeout
                             try:
                                 async with asyncio.timeout(timeout):
@@ -263,19 +285,44 @@ class DialogueEngine:
                                     if violation := self._screen(sentence):
                                         blocked.append(violation)
                                         yield SentenceBlocked(violation.rule, sentence)
+                                        if violation.rule == ROLE_LEAKAGE_RULE:
+                                            leaked = True  # stop reading: the rest is unreliable
+                                            break
                                     else:
                                         spoken.append(sentence)
                                         yield Say(sentence)
                             elif isinstance(event, ToolCallEvent):
                                 calls.append(event.call)
-                        if tail := splitter.flush():
+                        if not leaked and (tail := splitter.flush()):
                             if violation := self._screen(tail):
                                 blocked.append(violation)
                                 yield SentenceBlocked(violation.rule, tail)
+                                leaked = violation.rule == ROLE_LEAKAGE_RULE
                             else:
                                 spoken.append(tail)
                                 yield Say(tail)
-                    if not spoken and not calls:
+                    dropped = tuple(call.name for call in calls) if leaked else ()
+                    if leaked:
+                        if dropped:
+                            logger.warning("role leakage: dropping tool calls %s", dropped)
+                            yield ToolCallsDropped(ROLE_LEAKAGE_RULE, dropped)
+                        calls = []
+                        carried += spoken  # the caller heard these, they stay in the history
+                        if attempt == 1:
+                            first_blocked = blocked
+                            # Calls the model meant to make after the leak count as dropped too.
+                            correction = Message(
+                                Role.SYSTEM, correction_note(blocked, calls_dropped=True)
+                            )
+                            logger.warning("role leakage in the reply; asking again")
+                            continue
+                        spoken = []
+                        if not carried:
+                            leak = next(v for v in blocked if v.rule == ROLE_LEAKAGE_RULE)
+                            fallback = fallback_sentence([leak])
+                            carried.append(fallback)
+                            yield Say(fallback)
+                    elif not spoken and not calls and not carried:
                         violations = blocked or first_blocked
                         if not violations:
                             failure = LLMError("the LLM returned an empty reply")
@@ -293,8 +340,8 @@ class DialogueEngine:
                 except LLMError as exc:
                     failure = exc
                 except (asyncio.CancelledError, GeneratorExit):
-                    if spoken:
-                        self._messages.append(Message(Role.ASSISTANT, " ".join(spoken)))
+                    if carried or spoken:
+                        self._messages.append(Message(Role.ASSISTANT, " ".join(carried + spoken)))
                     raise
 
                 if failure is None:
@@ -306,6 +353,7 @@ class DialogueEngine:
                     del self._messages[checkpoint:]
                 raise failure
 
+            spoken = carried + spoken
             if spoken or calls:
                 self._messages.append(
                     Message(

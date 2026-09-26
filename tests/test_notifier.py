@@ -732,6 +732,7 @@ async def test_confirm_booking_returns_at_once_while_telegram_is_down(store):
     tools = ToolRegistry(
         load_business_config(REPO_CONFIG), sink, clock=lambda: NOW, caller_phone="+79991234567"
     )
+    tools.begin_turn("Меня зовут Игорь, мой номер 8 916 123 45 67")
     await tools.execute(ToolCall("c1", "prepare_booking", BOOKING_ARGS))
     tools.begin_turn()  # the caller answered the read-back
 

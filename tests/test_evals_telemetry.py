@@ -142,7 +142,7 @@ async def test_dialogue_engine_sees_no_difference_and_its_retry_is_logged_as_two
     class NoTools:
         specs = []
 
-        def begin_turn(self):
+        def begin_turn(self, user_text):
             pass
 
         async def execute(self, call):

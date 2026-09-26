@@ -248,6 +248,8 @@ def format_transcript(g: Graded) -> str:
             lines.append(f"  [tool] {item.tool}({args[:160]}) -> {mark}{item.text[:110]}")
         elif item.kind == "blocked":
             lines.append(f"  [guard: {item.rule}] {item.text}")
+        elif item.kind == "dropped":
+            lines.append(f"  [guard: {item.rule}] tool calls dropped: {item.text}")
         elif item.kind == "failed":
             lines.append(f"  [сбой] {item.text}")
         elif item.kind == "end":

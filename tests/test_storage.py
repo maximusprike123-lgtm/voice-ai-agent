@@ -402,7 +402,9 @@ async def test_in_memory_sink_returns_ids_too():
 
 def registry(sink) -> ToolRegistry:
     business = load_business_config(REPO_CONFIG)
-    return ToolRegistry(business, sink, clock=lambda: NOW, caller_phone="+79991234567")
+    tools = ToolRegistry(business, sink, clock=lambda: NOW, caller_phone="+79991234567")
+    tools.begin_turn("Меня зовут Игорь, мой номер 8 916 123 45 67")  # what the caller said
+    return tools
 
 
 BOOKING_ARGS = (

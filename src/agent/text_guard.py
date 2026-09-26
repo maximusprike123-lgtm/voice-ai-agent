@@ -101,11 +101,20 @@ class Violation:
     detail: str = ""
 
 
-def correction_note(violations: list["Violation"]) -> str:
+# Added to the note when the round's tool calls were thrown away (role leakage).
+_CALLS_DROPPED = (
+    "Все вызовы инструментов из этой реплики отменены и НЕ выполнены. Не выдумывай данные "
+    "клиента (имя, телефон и другие): если они нужны, спроси их у клиента."
+)
+
+
+def correction_note(violations: list["Violation"], calls_dropped: bool = False) -> str:
     """The hidden note for the corrective round, one paragraph per distinct rule."""
     seen: dict[str, str] = {}
     for v in violations:
         seen.setdefault(v.rule, _CORRECTIONS[v.rule].format(sentence=v.sentence))
+    if calls_dropped:
+        seen["calls_dropped"] = _CALLS_DROPPED
     return "Служебное сообщение (клиент его не слышит). " + " ".join(seen.values())
 
 

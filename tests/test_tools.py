@@ -47,9 +47,20 @@ def sink():
     return InMemorySink()
 
 
+CALLER_WORDS = "Меня зовут Игорь, мой номер 8 916 123 45 67"
+
+
+def registry(business, sink, *, clock=lambda: NOW, caller_phone=None, heard=CALLER_WORDS):
+    """A ToolRegistry that has already heard the caller give the name and the phone that
+    valid_args() uses (grounding refuses data the caller never said)."""
+    tools = ToolRegistry(business, sink, clock=clock, caller_phone=caller_phone)
+    tools.begin_turn(heard)
+    return tools
+
+
 @pytest.fixture
 def tools(business, sink):
-    return ToolRegistry(business, sink, clock=lambda: NOW, caller_phone="+79991234567")
+    return registry(business, sink, caller_phone="+79991234567")
 
 
 def valid_args(**overrides):
@@ -148,6 +159,7 @@ async def test_read_back_has_no_digits_at_all(tools):
     ],
 )
 async def test_read_back_always_says_exactly_the_last_four_digits(tools, phone, spoken):
+    tools.begin_turn(f"мой номер {phone}")
     say = (await prepare(tools, phone=phone)).say
     tail = say.split("заканчивается на ")[1].split(".")[0]
     assert tail == spoken
@@ -254,7 +266,7 @@ async def test_confirm_consumes_the_draft(tools, sink):
 
 async def test_confirm_revalidates_and_rejects_a_draft_that_went_stale(business, sink):
     clock = {"now": NOW}
-    tools = ToolRegistry(business, sink, clock=lambda: clock["now"])
+    tools = registry(business, sink, clock=lambda: clock["now"])
     await prepare(tools, preferred_date="2026-09-24", preferred_time="18:00")
 
     clock["now"] = NOW + timedelta(hours=2)  # 19:05: 18:00 has passed while the caller thought
@@ -316,7 +328,7 @@ class BrokenSink:
 
 
 async def test_sink_failure_is_reported_keeps_the_draft_and_allows_a_retry(business):
-    tools = ToolRegistry(business, BrokenSink(), clock=lambda: NOW)
+    tools = registry(business, BrokenSink())
     await prepare(tools)
     failed = await confirm(tools)
     assert is_error(failed) and "не удалось" in failed.result
@@ -493,6 +505,7 @@ async def test_callers_words_are_kept_in_notes(tools, sink):
 
 
 async def test_take_message_saves_a_record(tools, sink):
+    tools.begin_turn("Меня зовут Анна")
     outcome = await call(
         tools,
         "take_message",
@@ -572,7 +585,7 @@ async def test_end_call_without_any_booking_is_always_allowed(tools):
 
 
 async def test_end_call_is_allowed_after_a_failed_confirm(business):
-    tools = ToolRegistry(business, BrokenSink(), clock=lambda: NOW)
+    tools = registry(business, BrokenSink())
     tools.begin_turn()
     await prepare(tools)
     assert is_error(await confirm(tools))  # nothing was accepted
@@ -705,7 +718,7 @@ async def test_only_saves_are_committed(tools, business):
 
 
 async def test_failures_have_no_say_and_are_not_committed(business):
-    tools = ToolRegistry(business, BrokenSink(), clock=lambda: NOW)
+    tools = registry(business, BrokenSink())
     await prepare(tools)
     failed_booking = await confirm(tools)
     failed_message = await call(tools, "take_message", {"message": "вопрос"})
@@ -728,7 +741,7 @@ async def test_take_message_through_the_engine_ends_the_turn_without_another_llm
             StreamEnd("tool_calls"),
         ],
     )
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     events = [e async for e in engine.respond("Есть ли скидки?")]
 
@@ -749,7 +762,7 @@ async def test_the_caller_can_hang_up_on_the_turn_after_the_acceptance(business,
             StreamEnd("tool_calls"),
         ],
     )
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     await collect_events(engine, "Запишите меня")
     await collect_events(engine, "Да, всё верно")
@@ -813,7 +826,7 @@ async def test_the_model_cannot_skip_the_callers_yes_through_the_engine(business
         ],
         tool_round(ToolCall("c3", "confirm_booking", "{}")),
     )
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     first = await collect_events(engine, "Запишите меня, всё как обычно")
 
@@ -862,7 +875,7 @@ def test_specs_are_exactly_the_four_tools(business):
 
 
 def test_specs_do_not_depend_on_caller_time_or_call(business):
-    a = ToolRegistry(business, InMemorySink(), clock=lambda: NOW, caller_phone="+79990000001")
+    a = registry(business, InMemorySink(), caller_phone="+79990000001")
     b = ToolRegistry(
         business,
         InMemorySink(),
@@ -874,7 +887,7 @@ def test_specs_do_not_depend_on_caller_time_or_call(business):
 
 
 async def test_specs_do_not_change_while_a_draft_exists(business, sink):
-    tools = ToolRegistry(business, sink, clock=lambda: NOW)
+    tools = registry(business, sink)
     before = json.dumps([s.to_api() for s in tools.specs])
     await prepare(tools)
     assert json.dumps([s.to_api() for s in tools.specs]) == before
@@ -935,7 +948,7 @@ async def test_read_back_is_spoken_verbatim_and_the_turn_ends_without_another_ll
     business, sink
 ):
     llm = ScriptedLLM(tool_round(prepare_call()))
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     events = [e async for e in engine.respond("Запишите меня на полировку")]
 
@@ -950,7 +963,7 @@ async def test_full_flow_prepare_yes_confirm_through_the_engine(business, sink):
     llm = ScriptedLLM(
         tool_round(prepare_call()), tool_round(ToolCall("c2", "confirm_booking", "{}"))
     )
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     [e async for e in engine.respond("Запишите меня")]
     assert sink.bookings == []
@@ -974,7 +987,7 @@ async def test_validation_error_goes_back_to_the_model_which_retries(business, s
         [TextDelta("В воскресенье мы не работаем. Подойдёт суббота?"), StreamEnd("stop")],
         tool_round(prepare_call("c2", preferred_date=SATURDAY)),
     )
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     first = [e async for e in engine.respond("Запишите на воскресенье")]
     assert first[0].result.startswith(ERROR_PREFIX)
@@ -1000,7 +1013,7 @@ async def test_model_that_confirms_and_hangs_up_in_one_turn_is_stopped_then_may_
         # turn 3: «нет, спасибо»
         [TextDelta("Всего доброго!"), ToolCallEvent(hangup_later), StreamEnd("tool_calls")],
     )
-    engine = DialogueEngine(llm, ToolRegistry(business, sink, clock=lambda: NOW), "SYS")
+    engine = DialogueEngine(llm, registry(business, sink), "SYS")
 
     await collect_events(engine, "Запишите меня")
     second = await collect_events(engine, "Да, всё верно")
@@ -1018,3 +1031,178 @@ async def test_model_that_confirms_and_hangs_up_in_one_turn_is_stopped_then_may_
 
 async def collect_events(engine, user_text):
     return [event async for event in engine.respond(user_text)]
+
+
+# --- Grounding: data the caller never said is refused -----------------------------------------
+
+
+async def test_a_phone_the_caller_never_said_is_refused_and_nothing_is_prepared(business, sink):
+    tools = registry(business, sink, heard="Меня зовут Игорь. Хочу записаться на полировку.")
+
+    outcome = await prepare(tools)
+
+    assert is_error(outcome) and "phone:" in outcome.result and "не называл" in outcome.result
+    assert outcome.say is None
+    assert is_error(await confirm(tools)) and sink.bookings == []  # no draft to confirm
+
+
+async def test_the_refusal_offers_the_caller_id_only_when_there_is_one(business, sink):
+    with_id = registry(business, sink, caller_phone="+79991234567", heard="Игорь")
+    hidden = registry(business, sink, heard="Игорь")
+
+    assert "с которого он звонит" in (await prepare(with_id)).result
+    assert "с которого он звонит" not in (await prepare(hidden)).result
+    assert "не определён" in (await prepare(hidden)).result
+
+
+async def test_the_caller_id_needs_no_dictation(business, sink):
+    tools = registry(business, sink, caller_phone="+79991234567", heard="Меня зовут Игорь")
+
+    assert not is_error(await prepare(tools, phone="8 999 123 45 67"))
+
+
+async def test_the_caller_id_is_only_accepted_when_it_is_the_caller_id(business, sink):
+    tools = registry(business, sink, caller_phone="+79991234567", heard="Меня зовут Игорь")
+
+    assert is_error(await prepare(tools, phone="+79161234567"))
+
+
+async def test_a_phone_dictated_in_words_and_in_pieces_is_accepted(business, sink):
+    tools = registry(business, sink, heard="Меня зовут Игорь")
+    tools.begin_turn("девятьсот шестнадцать")
+    tools.begin_turn("сто двадцать три сорок пять шестьдесят семь")
+
+    assert not is_error(await prepare(tools))
+
+
+async def test_one_wrong_digit_is_refused(business, sink):
+    tools = registry(business, sink)
+
+    assert is_error(await prepare(tools, phone="+79161234568"))
+
+
+async def test_a_number_dictated_later_lets_the_retry_through(business, sink):
+    tools = registry(business, sink, heard="Меня зовут Игорь")
+    assert is_error(await prepare(tools))
+
+    tools.begin_turn("Запишите на 8 916 123 45 67")
+
+    assert not is_error(await prepare(tools))
+
+
+async def test_a_made_up_phone_and_name_are_reported_together(business, sink):
+    tools = registry(business, sink, heard="Здравствуйте")
+
+    outcome = await prepare(tools)
+
+    assert "phone:" in outcome.result and "name:" in outcome.result
+
+
+async def test_validation_problems_come_first(business, sink):
+    tools = registry(business, sink, heard="Здравствуйте")
+
+    outcome = await prepare(tools, service_id="nope")
+
+    assert "service_id" in outcome.result and "phone:" not in outcome.result
+
+
+async def test_confirm_does_not_check_again(business, sink):
+    tools = registry(business, sink)
+    await prepare(tools)
+
+    assert not is_error(await confirm(tools))  # heard the caller in an earlier turn
+    assert len(sink.bookings) == 1
+
+
+# name: refused once, then let through after the caller has spoken again
+
+
+async def test_a_name_the_caller_never_said_is_refused_once(business, sink):
+    tools = registry(business, sink, heard="Запишите на 8 916 123 45 67")
+
+    outcome = await prepare(tools, name="Дмитрий")
+
+    assert is_error(outcome) and "name:" in outcome.result and "Дмитрий" in outcome.result
+    assert "phone:" not in outcome.result
+
+
+async def test_the_same_name_in_the_same_turn_is_still_refused(business, sink):
+    tools = registry(business, sink, heard="Запишите на 8 916 123 45 67")
+    assert is_error(await prepare(tools, name="Дмитрий"))
+
+    assert is_error(await prepare(tools, name="Дмитрий"))
+
+
+async def test_the_same_name_after_the_caller_spoke_again_is_accepted(business, sink, caplog):
+    tools = registry(business, sink, heard="Запишите на 8 916 123 45 67")
+    assert is_error(await prepare(tools, name="Дмитрий"))
+
+    tools.begin_turn("Дима")  # a short form of the name
+
+    with caplog.at_level("WARNING"):
+        assert not is_error(await prepare(tools, name="Дмитрий"))
+    assert "never said" in caplog.text
+
+
+async def test_another_name_is_refused_again(business, sink):
+    tools = registry(business, sink, heard="Запишите на 8 916 123 45 67")
+    assert is_error(await prepare(tools, name="Дмитрий"))
+    tools.begin_turn("Не знаю")
+
+    assert is_error(await prepare(tools, name="Сергей"))
+
+
+async def test_a_name_in_another_case_form_is_accepted(business, sink):
+    tools = registry(business, sink, heard="Зовите меня Дмитрию, номер 8 916 123 45 67")
+
+    assert not is_error(await prepare(tools, name="Дмитрий"))
+
+
+# take_message
+
+
+async def test_take_message_refuses_a_phone_the_caller_never_said(business, sink):
+    tools = registry(business, sink, heard="Перезвоните мне")
+
+    outcome = await call(tools, "take_message", {"message": "Перезвоните", "phone": "89161234567"})
+
+    assert is_error(outcome) and "phone:" in outcome.result and not outcome.committed
+    assert sink.messages == []
+
+
+async def test_take_message_refuses_a_half_made_up_phone_too(business, sink):
+    tools = registry(business, sink, heard="Перезвоните мне")
+
+    outcome = await call(tools, "take_message", {"message": "Перезвоните", "phone": "916 12"})
+
+    assert is_error(outcome) and sink.messages == []
+
+
+async def test_take_message_accepts_a_phone_that_was_said_or_the_caller_id(business, sink):
+    tools = registry(business, sink, caller_phone="+79991234567", heard="Мой номер 916 123 45 67")
+
+    assert not is_error(await call(tools, "take_message", {"message": "a", "phone": "9161234567"}))
+    assert not is_error(await call(tools, "take_message", {"message": "b", "phone": "89991234567"}))
+    assert [m.phone for m in sink.messages] == ["+79161234567", "+79991234567"]
+
+
+async def test_take_message_saves_without_a_name_the_caller_never_said(business, sink, caplog):
+    tools = registry(business, sink, heard="Перезвоните мне")
+
+    with caplog.at_level("WARNING"):
+        outcome = await call(tools, "take_message", {"message": "Перезвоните", "name": "Дмитрий"})
+
+    assert not is_error(outcome) and outcome.committed
+    assert sink.messages[0].name is None and sink.messages[0].message == "Перезвоните"
+    assert "never said" in caplog.text
+
+
+async def test_the_registry_hears_the_caller_through_the_engine(business, sink):
+    llm = ScriptedLLM(tool_round(prepare_call()), [TextDelta("Уточните номер."), StreamEnd("stop")])
+    tools = ToolRegistry(business, sink, clock=lambda: NOW)
+    engine = DialogueEngine(llm, tools, "SYS")
+
+    events = [e async for e in engine.respond("Запишите на полировку")]
+
+    [result] = [e for e in events if isinstance(e, ToolResult)]
+    assert result.result.startswith(ERROR_PREFIX) and "phone:" in result.result

@@ -288,7 +288,9 @@ async def test_records_saved_before_an_unexpected_exception_are_kept(tmp_path):
         tool_round("confirm_booking"),
         RuntimeError("bug after the save"),
     )
-    caller = ScriptedLLM(text("Запишите меня."), text("Да."), text("Спасибо."))
+    caller = ScriptedLLM(
+        text("Меня зовут Игорь, номер 8 916 123 45 67."), text("Да."), text("Спасибо.")
+    )
 
     result = await run(BY_ID["happy_path_booking"], agent, caller, tmp_path)
 
@@ -305,7 +307,7 @@ async def test_each_run_gets_its_own_database_and_the_clock_is_fixed(tmp_path):
         )
 
     caller_lines = [
-        text("Запишите меня."),
+        text("Меня зовут Игорь, номер 8 916 123 45 67."),
         text("Да, всё верно."),
         text("Нет, спасибо. До свидания. [КОНЕЦ]"),
     ]
@@ -786,7 +788,7 @@ async def test_the_harness_carries_on_after_a_premature_marker_and_reports_it(tm
         [TextDelta("Всего доброго!"), *tool_round("end_call")],
     )
     caller = ScriptedLLM(
-        text("Запишите меня. [КОНЕЦ]"),  # premature: no farewell
+        text("Меня зовут Игорь, номер 8 916 123 45 67. [КОНЕЦ]"),  # premature: no farewell
         text("Да, всё верно. [КОНЕЦ]"),  # premature again
         text("Нет, спасибо. До свидания. [КОНЕЦ]"),
     )
@@ -1007,7 +1009,7 @@ async def test_a_farewell_is_deferred_while_the_agents_reply_asks_a_question(tmp
         [TextDelta("Всего доброго!"), *tool_round("end_call")],
     )
     caller = ScriptedLLM(
-        text("Запишите меня."),
+        text("Меня зовут Игорь, номер 8 916 123 45 67."),
         text("Да, всё верно, спасибо. До свидания. [КОНЕЦ]"),  # farewell answering the read-back
         text("Нет, спасибо. До свидания. [КОНЕЦ]"),  # the answer to «Могу ещё чем-то помочь?»
     )

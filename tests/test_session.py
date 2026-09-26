@@ -42,7 +42,7 @@ class NoTools:
     def __init__(self, outcomes=None):
         self.outcomes = outcomes or {}
 
-    def begin_turn(self):
+    def begin_turn(self, user_text):
         pass
 
     async def execute(self, call):
