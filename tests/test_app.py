@@ -258,3 +258,13 @@ async def test_each_call_gets_its_own_guard_state(tmp_path):
         first, second = runtime.new_call()._engine, runtime.new_call()._engine
         first.guard.note_commit()
         assert first.guard.committed and not second.guard.committed
+
+
+async def test_the_agent_gender_setting_reaches_the_system_prompt(tmp_path):
+    for gender, expected in (("male", "мужском роде"), ("female", "женском роде")):
+        llm = ScriptedLLM([TextDelta("Слушаю."), StreamEnd("stop")])
+        settings = make_settings(tmp_path, agent_gender=gender)
+        async with open_runtime(settings, llm=llm, clock=lambda: NOW) as runtime:
+            [e async for e in runtime.new_call().handle("Алло")]
+        system = llm.calls[0][0].content
+        assert f"О себе говори в {expected}" in system

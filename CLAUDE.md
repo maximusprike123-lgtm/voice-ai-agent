@@ -67,14 +67,16 @@ see docs/evals.md). ~1080 offline tests. Post-tag follow-ups are done, and so ar
 (role leakage drops the round's tool calls; tools refuse a phone/name the caller never said) and
 **step 1.12** (the caller ID is refused once when another number was dictated; new eval scenario
 `dictates_other_number`; the false failures of the phone checks fixed offline); details in docs/.
-**Step 1 is closed for good; step 2 is next.**
+**Step 1 is closed for good.**
+
+**STEP 2 (voice) IN PROGRESS.** Done: 2.1.a (`AGENT_GENDER` setting, prompt line, neutral code phrases),
+2.1.b (`agent.speech`: G.711, resampler, phone-line simulation, WAV, pacing), 2.1.c (text before TTS:
+numbers/Latin to words + speech guard); ~1420 tests. Decisions: TTS ElevenLabs (fallback Silero v5), STT
+ElevenLabs vs T-one to compare; details in docs/. Next: 2.1.d (TTS clients), needs a cost estimate first.
 
 Code map: `src/agent/{dialogue,session,app,cli,tools,grounding,records,storage,notifier,text_guard,
-ru_words,prompt,llm,settings,business}.py`, `evals/`, `scripts/`, `config/business.yaml`.
-
-**Next (NOT started, needs a plan and approval first):** step 2 (STT/TTS, local mic): pick the
-voice (**gender**: fallback phrases are masculine), wire `SpeechGuard` before TTS, decide the
-production LLM/provider order, re-run the latency study from the production VPS.
+ru_words,prompt,llm,settings,business}.py`, `src/agent/speech/{audio,g711,resample,text}.py`, `evals/`,
+`scripts/`, `config/business.yaml`.
 
 **Roadmap:** step 2 (STT/TTS, local mic), then step 3 (Asterisk + AudioSocket on the real VPS;
 adds `call_id` as SQLite migration 2, and `mark_spoken`).
@@ -87,14 +89,13 @@ adds `call_id` as SQLite migration 2, and `mark_spoken`).
 - **Ollama backup unusable for calls** (8GB CPU Mac: first sentence 13–27s); offline logic dev only.
 - **Telegram:** permanent failure = silent pile-up (needs a second alert channel: unnotified
   records older than 30 min); reachable from Russia only unreliably (TLS stalls ~10s in 2/8 tries).
-- **TTS voice gender** must match the masculine fallback phrases (`ASK_TO_REPEAT` etc.) and the
-  model's gendered wording; state the agent's gender in the prompt once the voice is chosen.
+- **ElevenLabs is blocked for Russia by its own terms** (may not work from the Russian VPS): TTS falls
+  back to Silero v5, whose standard models are CC BY-NC (internal tests only; buy a licence or use `cis_base`
+  MIT before showing owners). Details in docs/open-issues.md.
 - **Model still slips:** writes «записал» (blocked by the guard) and recaps before `prepare_booking`
   (13%); hidden-ID «этот номер» offer 1/10.
 - **Together stalls on the first token in ~7% of requests, and the engine's retry goes to the same
   provider** (details in docs/open-issues.md); step 2 idea: retry via Fireworks. Not done.
-- **Foreign-script chars** (Chinese on qwen3.5): `foreign_script_chars()` guard exists in the
-  speech guard; step 2 must decide behavior before TTS.
 - **Conversation-level rule compliance** is model-dependent; run several evals, not one dialogue.
 - **Account guardrails** (ZDR/no training) exclude first-party `deepseek` and other providers.
 - **Gotcha for long sweeps:** start with `subprocess.Popen(..., start_new_session=True)`, track by

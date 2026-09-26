@@ -749,7 +749,7 @@ def test_the_agents_own_recap_before_prepare_is_a_warning_not_a_check():
         tool(2, "prepare_booking"),
         *READ_BACK,
     ]
-    [warning] = c.run_warnings(make_run(recap), CTX)
+    warning = recap_warning(make_run(recap))
     assert warning.name == "own_recap_before_prepare" and not warning.passed  # fired
     assert "Уточню" in warning.detail
     assert "own_recap_before_prepare" not in [chk.check_name for chk in c.INVARIANTS]
@@ -769,7 +769,7 @@ def test_the_agents_own_recap_before_prepare_is_a_warning_not_a_check():
     ],
 )
 def test_no_warning_when_there_was_no_recap_before_a_draft(items):
-    [warning] = c.run_warnings(make_run(items), CTX)
+    warning = recap_warning(make_run(items))
     assert warning.passed
 
 
@@ -788,8 +788,13 @@ def test_recap_phrases_that_trigger_the_warning(sentence):
     assert not c.run_warnings(run, CTX)[0].passed
 
 
+def recap_warning(run):
+    [warning] = [w for w in c.run_warnings(run, CTX) if w.name == "own_recap_before_prepare"]
+    return warning
+
+
 def test_warning_names_are_exported():
-    assert c.WARNING_NAMES == ("own_recap_before_prepare",)
+    assert c.WARNING_NAMES == ("own_recap_before_prepare", "wrong_gender_self_reference")
 
 
 # --- Second round of harness fixes ----------------------------------------------------------------
@@ -1063,3 +1068,33 @@ def test_the_sunday_scenario_passes_with_a_real_choice_of_the_caller_id():
     ]
 
     assert [r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed] == []
+
+
+# --- The agent's gender ------------------------------------------------------------------------
+
+
+def gender_warning(sentences, gender="male"):
+    ctx = CheckContext(CTX.business, CTX.now, gender)
+    run = make_run([say(1, s) for s in sentences])
+    [warning] = [w for w in c.run_warnings(run, ctx) if w.name == "wrong_gender_self_reference"]
+    return warning
+
+
+@pytest.mark.parametrize(
+    ("gender", "sentence", "warns"),
+    [
+        ("male", "Я поняла, уточню.", True),
+        ("male", "Извините, я не расслышала.", True),
+        ("male", "Я понял, уточню.", False),
+        ("male", "Могу ещё чем-то помочь?", False),
+        ("female", "Я понял, сейчас проверю.", True),
+        ("female", "Я поняла, сейчас проверю.", False),
+        ("female", "Заявка принята и передана администратору.", False),  # not a first-person form
+    ],
+)
+def test_the_agent_speaking_in_the_other_gender_is_a_warning(gender, sentence, warns):
+    assert (not gender_warning([sentence], gender).passed) is warns
+
+
+def test_the_gender_warning_is_off_by_default_context_male():
+    assert CTX.agent_gender == "male"

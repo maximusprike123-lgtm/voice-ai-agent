@@ -1,0 +1,66 @@
+# Recording script for the first STT comparison (step 2.1.g): 50 items.
+# Columns (tab separated): id, how to say it, what to say (read aloud as written), expected digits.
+#
+# How to record:
+#  - One file per item, WAV or m4a, named <id>_<speaker>_<condition>.wav  (e.g. C06_igor_car.wav).
+#    Say only the text; keep ~0.5 s of silence before and after; do not read the id or the style.
+#  - Conditions: quiet = quiet room; car = in the car (engine on, windows closed), phone on the
+#    dashboard or handsfree/Bluetooth as a customer would; street = outside.
+#  - Suggested split: you record all 50 in a quiet room, then A01-A05, C01-C10, D01-D04, E01-E06 in
+#    the car. Each friend records the C and E items (16) plus 8-10 of A, B, D in mixed conditions.
+#  - Record with the phone's voice memo (wideband). The telephone channel (8 kHz, G.711) is
+#    simulated afterwards, so record normally, not over a call.
+#  - The numbers in C01-C10 are invented; read them as written. C06-C08 are dictated IN PIECES with
+#    a pause at every comma: they test whether the recogniser cuts the number off at a pause.
+#  - S01/S02 contain no speech: they test for text invented out of silence and noise.
+# Only record yourself and people who agreed to it. Recordings go to data/stt_eval/ (git-ignored).
+A01	normal pace	Здравствуйте, хочу записаться на полировку кузова.	
+A02	normal pace	Мне нужна керамика на Тойоту Камри две тысячи восемнадцатого года.	
+A03	normal pace	Сколько стоит химчистка салона на Киа Рио?	
+A04	normal pace	Хочу оклеить капот и бампер защитной плёнкой, П-П-Ф.	
+A05	normal pace	У меня Мерседес Е-класса, нужна детейлинг-мойка.	
+A06	normal pace	Нужна полировка фар на Хендай Солярис.	
+A07	normal pace	Хочу сделать антидождь и обработку кожи в салоне на БМВ икс пять.	
+A08	normal pace	Машина Лада Веста, нужна мойка двигателя и химчистка потолка.	
+A09	normal pace	Подскажите, делаете ли вы удаление вмятин без покраски?	
+A10	normal pace	Мне нужна шумоизоляция дверей на Фольксваген Тигуан.	
+A11	normal pace	Запишите меня на мойку и полировку Ауди А шесть.	
+A12	normal pace	Хочу узнать про керамическое покрытие для Лексуса эр-икс.	
+A13	normal pace	Рено Дастер, нужна химчистка сидений после поездки с собакой.	
+A14	normal pace	Хочу заказать защиту кузова от сколов на Ниссан Кашкай.	
+B01	normal pace	Меня зовут Игорь.	
+B02	normal pace	Меня зовут Анастасия, можно просто Настя.	
+B03	normal pace	Ахмед, Ахмед Сулейманов.	
+B04	normal pace	Нодира Каримова.	
+B05	normal pace	Дмитрий Викторович.	
+B06	normal pace	Записывайте на имя Ольга.	
+C01	digit by digit, even pace	восемь девять ноль три пять пять пять один два три четыре	89035551234
+C02	digit by digit, fast, no pauses	восемь девять ноль ноль семь семь семь ноль пять шесть семь	89007770567
+C03	in groups	восемь, девятьсот шестнадцать, двести сорок восемь, тридцать пять, ноль девять	89162483509
+C04	in groups, fast	плюс семь девятьсот двадцать семь пятьсот один двадцать три сорок пять	79275012345
+C05	in groups	мой номер восемь девятьсот шестьдесят пять сто десять двадцать два тридцать три	89651102233
+C06	IN PIECES: pause 1.5 s at every comma	восемь девятьсот три, пятьсот пятьдесят пять, двенадцать, тридцать четыре	89035551234
+C07	IN PIECES: pause 1.5 s at every comma	восемь девять ноль ноль, семь семь семь, ноль пять, шесть семь	89007770567
+C08	IN PIECES: pause 1.5 s at every comma	плюс семь, девятьсот шестнадцать, сто двадцать три, сорок пять, шестьдесят семь	79161234567
+C09	with a hesitation in the middle	запишите номер... э-э... восемь девятьсот двадцать шесть, тридцать четыре ноль ноль, восемьдесят восемь	89263400088
+C10	correction	мой номер восемь девятьсот три пятьсот пятьдесят пять двенадцать тридцать четыре, нет, простите, тридцать пять	89035551235
+D01	normal pace	Запишите меня на завтра на четырнадцать тридцать.	
+D02	normal pace	В субботу после обеда.	
+D03	normal pace	Двадцать шестого сентября в десять утра.	
+D04	normal pace	В понедельник, в одиннадцать ноль-ноль.	
+D05	normal pace	В пятницу вечером, часов в шесть.	
+D06	normal pace	Через три дня, ближе к вечеру.	
+D07	normal pace	Сегодня, если есть время после восемнадцати.	
+D08	normal pace	Может, в воскресенье? Ой, вы же в воскресенье не работаете, тогда в понедельник.	
+E01	short and quick	Да.	
+E02	short and quick	Нет.	
+E03	short and quick	Верно.	
+E04	short and quick	Угу, всё верно.	
+E05	short and quick	Нет, не так, поменяйте время на пятнадцать часов.	
+E06	short and quick	Да, записывайте, спасибо, до свидания.	
+F01	normal pace	Сколько стоит керамическое покрытие?	
+F02	normal pace	Где вы находитесь и как к вам проехать?	
+F03	normal pace	До какого времени вы работаете в субботу?	
+F04	normal pace	А скидки у вас есть?	
+S01	SILENCE: say nothing for 10 seconds		
+S02	NOISE ONLY: engine on, say nothing for 10 seconds		

@@ -101,3 +101,12 @@ def test_the_speech_guard_is_on_by_default_and_has_a_kill_switch(env):
     assert Settings(_env_file=None).speech_guard is True
     env.setenv("SPEECH_GUARD", "false")
     assert Settings(_env_file=None).speech_guard is False
+
+
+def test_the_agent_is_male_by_default_and_the_gender_is_validated(env):
+    assert Settings(_env_file=None).agent_gender == "male"
+    env.setenv("AGENT_GENDER", "female")
+    assert Settings(_env_file=None).agent_gender == "female"
+    env.setenv("AGENT_GENDER", "robot")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

@@ -696,7 +696,29 @@ def own_recap_before_prepare(run: RunResult, ctx: CheckContext) -> CheckResult:
     return CheckResult(name, True)  # no booking was prepared: not applicable
 
 
-WARNINGS: tuple[Check, ...] = (own_recap_before_prepare,)
+# First-person past-tense forms of the verbs the agent uses, by gender. The agent speaking in the
+# OTHER gender's forms is a slip against the prompt line about its own gender.
+_MASCULINE_SELF = re.compile(
+    r"\b(?:понял|принял|уточнил|проверил|расслышал|услышал|передал|отправил|извинился)\b", re.I
+)
+_FEMININE_SELF = re.compile(
+    r"\b(?:поняла|приняла|уточнила|проверила|расслышала|услышала|передала|отправила|извинилась)\b",
+    re.I,
+)
+
+
+@named("wrong_gender_self_reference")
+def wrong_gender_self_reference(run: RunResult, ctx: CheckContext) -> CheckResult:
+    """The agent spoke about itself in the other gender's forms («я поняла» for a male agent).
+    Only a warning: `passed` means "no warning"."""
+    name = "wrong_gender_self_reference"
+    wrong = _FEMININE_SELF if ctx.agent_gender == "male" else _MASCULINE_SELF
+    for sentence in _sentences_matching(run, wrong):
+        return CheckResult(name, False, f"a {ctx.agent_gender} agent said {sentence!r}")
+    return CheckResult(name, True)
+
+
+WARNINGS: tuple[Check, ...] = (own_recap_before_prepare, wrong_gender_self_reference)
 WARNING_NAMES = tuple(w.check_name for w in WARNINGS)
 
 

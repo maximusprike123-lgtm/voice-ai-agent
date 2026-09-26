@@ -26,10 +26,25 @@ routing, guardrails, infra noise) are in [latency.md](latency.md). Eval history 
   bot blocked, chat not found), bookings pile up unnotified and the owner doesn't know
   (the only trace is an ERROR log line). Before real customers: add a second alert channel
   (e.g. alert me if unnotified records are older than 30 minutes).
-- **Fallback phrases use masculine forms («не расслышал»); they must match the gender of the
-  TTS voice chosen in step 2** (`ASK_TO_REPEAT` in `session.py`; a test documents it). The
-  model's own wording is gendered too («принял», «записал»): the prompt should state the
-  agent's gender once the voice is chosen.
+- **Agent gender: DONE in step 2.1.a (2026-09-26).** `AGENT_GENDER=male|female` (default male) picks the
+  TTS voice (from 2.1.d) and adds one line to the static part of the prompt («О себе говори в мужском /
+  женском роде»); phrases written in code are gender-neutral (`ASK_TO_REPEAT` is now «Простите, плохо
+  слышно. Повторите, пожалуйста.»; a test scans every code-built phrase for first-person past-tense
+  forms); the eval warning metric `wrong_gender_self_reference` counts the model slipping into the
+  other gender. Not measured in a sweep yet (no LLM run was needed for 2.1.a).
+- **ElevenLabs and Russia (found 2026-09-26, step 2.0/2.1).** ElevenLabs states it must block Russia
+  (help-center page «Do you restrict access… for any specific countries»), possibly by IP, so it may not
+  work from the Russian production VPS; how requests reach it from the user's side is the user's
+  responsibility. The design copes with that: TTS has a fallback (Silero v5, local) that is wired and
+  checked from the start, and the primary goes on a 60 s pause after a failure (step 2.1.d). STT has no
+  such fallback: T-one (local, Apache 2.0) is the other candidate to compare.
+- **Silero licence.** Standard v5 models are CC BY-NC (non-commercial); a commercial licence is sold by
+  Silero (hello@silero.ai, price unknown); the `v5_cis_base` models are MIT (quality to be judged by ear
+  in step 2.1.d). Internal tests use the standard model; before showing the agent to the owners: a bought
+  licence or `cis_base`.
+- **No AMR-NB encoder in the local ffmpeg** (decoder only), so the cellular codec of a real call cannot be
+  simulated with it; the step 2.1.g comparison simulates 8 kHz + G.711 only, and real calls (step 3) will
+  show the rest.
 - **(Historical: before the guard and the prompt pass; the counts in «Final comparison» supersede
   it) 1.10 baseline 2: what the 14 failures of the second sweep were (triage from transcripts).** *Harness/check artifacts (5 runs, not agent faults):* the caller
   volunteers its phone number together with its name, so `asks_for_a_number` (hidden_caller_id)

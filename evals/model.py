@@ -70,6 +70,7 @@ class CheckResult:
 class CheckContext:
     business: BusinessConfig
     now: datetime  # the clock the call ran on
+    agent_gender: str = "male"  # the agent's gender setting during the run
 
 
 Check = Callable[[RunResult, CheckContext], CheckResult]

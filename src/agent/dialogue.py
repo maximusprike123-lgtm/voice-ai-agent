@@ -27,7 +27,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from agent.llm import (
@@ -77,6 +77,10 @@ class Say:
     """One complete sentence of the agent's reply, ready to be spoken."""
 
     text: str
+    # Written by code (read-back, acceptance, greeting, fallbacks), not by the model. The audio
+    # path checks such text more leniently: a guard hit there is a bug to log, not a reason to
+    # go silent. Not part of equality: a sentence is the same sentence either way.
+    scripted: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -321,7 +325,7 @@ class DialogueEngine:
                             leak = next(v for v in blocked if v.rule == ROLE_LEAKAGE_RULE)
                             fallback = fallback_sentence([leak])
                             carried.append(fallback)
-                            yield Say(fallback)
+                            yield Say(fallback, scripted=True)
                     elif not spoken and not calls and not carried:
                         violations = blocked or first_blocked
                         if not violations:
@@ -336,7 +340,7 @@ class DialogueEngine:
                         else:
                             fallback = fallback_sentence(violations)
                             spoken.append(fallback)
-                            yield Say(fallback)
+                            yield Say(fallback, scripted=True)
                 except LLMError as exc:
                     failure = exc
                 except (asyncio.CancelledError, GeneratorExit):
@@ -393,7 +397,7 @@ class DialogueEngine:
                 # the model knowing what the caller was being asked.
                 self._messages.append(Message(Role.ASSISTANT, text))
                 for sentence in split_sentences(text):
-                    yield Say(sentence)
+                    yield Say(sentence, scripted=True)
                 if ends_call:
                     yield EndCall()
                 return  # wait for the caller: no further LLM round

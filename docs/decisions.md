@@ -254,3 +254,32 @@ the same turn is refused); no digits in the error text. Applies to `prepare_book
 does not trigger the old failure, the rule fired twice and was correct, the earlier «failures» were an
 eval artifact.
 
+## Step 2.1.a-c (2026-09-26): gender, telephone audio, text before TTS (no paid calls)
+
+Decisions of step 2.1 (from the research in step 2.0 and the user's answers): TTS = ElevenLabs
+(streaming WebSocket, Flash v2.5) with Silero v5 as a local fallback that is wired and checked from the
+start (`FailoverTTS`: 1.5 s to the first byte, 60 s pause of the primary after a failure, no switching
+inside a sentence); STT = ElevenLabs Scribe v2 Realtime vs T-one (Apache 2.0, local, telephone-specific)
+compared on recordings; half-duplex in 2.1, barge-in in 2.2; code-built sentences are checked by the
+guard in «log and speak» mode except `phone_digits` and `foreign_script`; codec A-law until 1ATC says
+otherwise; T-one goes into its own venv if it conflicts.
+**2.1.a:** `AGENT_GENDER` (default male) -> the prompt line in the static part (`build_system_prompt(...,
+gender)`) and, later, the voice; the code phrases stay neutral (`ASK_TO_REPEAT` reworded, tests scan the
+code-built phrases and the greeting); eval `CheckContext.agent_gender` and the warning metric
+`wrong_gender_self_reference`.
+**2.1.b:** `agent.speech.{g711,resample,audio}` on numpy (`audioop` is gone in Python 3.13): A-law / mu-law
+(decoding equals ffmpeg's, encoding differs only on exact level boundaries, tested), a streaming
+`Resampler` (windowed sinc, chunk-size independent to 1e-9, exact output length), a telephone
+`BandPass` (300-3400 Hz), `TelephoneChannel` / `through_phone_line` (any rate -> 8 kHz -> band -> G.711),
+WAV and ffmpeg loading, 20 ms `frames`, real-time `paced`, `mix_at_snr` for noise.
+**2.1.c:** `Say.scripted` (compare=False) marks sentences written by code; `agent.speech.text`:
+`normalize_for_speech` (times, dates, prices with the genitive after «от/до/около/с», percentages, decimals,
+bare numbers, «№», Latin car names and abbreviations by a table plus transliteration, markup and emoji) and
+`SpeechText.prepare` (guard on BOTH the original and the normalized text: a first version checked only
+the normalized text and lost the Latin role label «user» to a transliteration, a test caught it).
+Measured on the saved eval runs: of 6796 agent sentences only 2 contained digits (both phone numbers), so
+normalization is a safety net; every change is logged. A test builds ~70 read-backs (phones, cars incl.
+Latin, dates, times, all services, notes with digits) and requires that none trips the guard.
+Known limits: years («две тысячи пятнадцать года»), «две недели» (feminine numerals), numbers over 999999
+(read digit by digit), unknown Latin words (transliterated with a warning).
+

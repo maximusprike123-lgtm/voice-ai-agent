@@ -190,3 +190,27 @@ def test_static_part_says_the_system_announces_results_and_to_wait_before_ending
 def test_naive_datetime_is_rejected(business):
     with pytest.raises(ValueError, match="timezone-aware"):
         build_system_prompt(business, datetime(2026, 9, 24, 17, 5))
+
+
+def test_the_prompt_tells_the_model_its_gender(business):
+    male = build_system_prompt(business, NOW)  # male is the default
+    female = build_system_prompt(business, NOW, gender="female")
+
+    assert "О себе говори в мужском роде" in male and "женском роде" not in male
+    assert "О себе говори в женском роде" in female and "мужском роде" not in female
+    assert build_system_prompt(business, NOW, gender="male") == male
+
+
+def test_the_gender_line_is_in_the_static_part_and_keeps_the_prefix_stable(business):
+    male = [build_system_prompt(business, NOW, phone) for phone in (None, "+79161234567")]
+    female = build_system_prompt(business, NOW, gender="female")
+
+    static = male[0].split(VOLATILE_MARKER)[0]
+    assert "О себе говори в мужском роде" in static
+    assert len(os.path.commonprefix(male)) >= len(static)  # the caller does not break the cache
+    assert female.split(VOLATILE_MARKER)[0] != static  # one gender per deployment, so it may differ
+
+
+def test_an_unknown_gender_is_rejected(business):
+    with pytest.raises(ValueError, match="gender"):
+        build_system_prompt(business, NOW, gender="other")

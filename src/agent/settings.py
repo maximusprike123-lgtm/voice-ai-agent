@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # Kill switch for the speech guard (agent.text_guard): on by default. Turning it off lets
     # the model's sentences through unchecked; it exists for debugging, not for production.
     speech_guard: bool = True
+    # The agent's gender: picks the TTS voice (step 2) and how the model speaks about itself in
+    # the prompt («я понял» / «я поняла»). Phrases written in code stay gender-neutral.
+    agent_gender: Literal["male", "female"] = "male"
 
     telegram_bot_token: SecretStr = Field(min_length=1)
     telegram_chat_id: str = Field(min_length=1)

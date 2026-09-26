@@ -360,7 +360,7 @@ async def test_two_failed_turns_show_the_failures_the_apology_and_the_saved_call
 
     joined = "\n".join(out)
     assert "[сбой] backend down (подряд: 1)" in joined
-    assert "АГЕНТ: Простите, я не расслышал. Повторите, пожалуйста." in out
+    assert "АГЕНТ: Простите, плохо слышно. Повторите, пожалуйста." in out
     assert "[сбой] backend down (подряд: 2)" in joined
     assert "АГЕНТ: Извините, у нас возникли технические неполадки." in out
     assert "[конец звонка] агент положил трубку" in joined

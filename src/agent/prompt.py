@@ -70,16 +70,27 @@ def _faq_section(business: BusinessConfig) -> str:
     return "\n".join(f"- Вопрос: {item.question}\n  Ответ: {item.answer}" for item in business.faq)
 
 
+AGENT_GENDER_LINES = {
+    "male": "О себе говори в мужском роде («я понял», «я проверил»).",
+    "female": "О себе говори в женском роде («я поняла», «я проверила»).",
+}
+
+
 def build_system_prompt(
-    business: BusinessConfig, now: datetime, caller_phone: str | None = None
+    business: BusinessConfig,
+    now: datetime,
+    caller_phone: str | None = None,
+    gender: str = "male",
 ) -> str:
     """Build the system prompt. `now` must be timezone-aware, in the business time zone.
 
-    Static content (persona, company data, rules) comes first and per-call content (time, caller
-    number, calendar) last, after VOLATILE_MARKER, to keep the prefix cacheable.
+    Static content (persona and its gender, company data, rules) comes first and per-call content
+    (time, caller number, calendar) last, after VOLATILE_MARKER, to keep the prefix cacheable.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
+    if gender not in AGENT_GENDER_LINES:
+        raise ValueError(f"gender must be one of {sorted(AGENT_GENDER_LINES)}, got {gender!r}")
 
     today = now.date()
     caller = caller_phone or "не определён"
@@ -88,7 +99,7 @@ def build_system_prompt(
     return f"""\
 Ты — голосовой администратор компании {business.name} (детейлинг автомобилей, Москва). \
 Ты отвечаешь на входящие телефонные звонки на русском языке. Твои ответы будут озвучены \
-синтезатором речи, собеседник тебя слышит, а не читает.
+синтезатором речи, собеседник тебя слышит, а не читает. {AGENT_GENDER_LINES[gender]}
 
 # О компании
 Адрес: {business.address}

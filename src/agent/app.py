@@ -53,7 +53,7 @@ class Runtime:
         engine = DialogueEngine(
             self.llm,
             ToolRegistry(self.business, self.sink, self.clock, caller_phone),
-            build_system_prompt(self.business, now, caller_phone),
+            build_system_prompt(self.business, now, caller_phone, self.settings.agent_gender),
             first_event_timeout=self.settings.llm_first_event_timeout_seconds,
             event_timeout=self.settings.llm_event_timeout_seconds,
             speech_guard=self.settings.speech_guard,

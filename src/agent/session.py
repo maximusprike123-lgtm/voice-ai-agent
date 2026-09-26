@@ -29,15 +29,15 @@ from agent.records import CallbackMessage, RecordSink
 
 logger = logging.getLogger(__name__)
 
-# NOTE: these use masculine forms («не расслышал»); they must match the gender of the TTS
-# voice chosen in step 2.
-ASK_TO_REPEAT = "Простите, я не расслышал. Повторите, пожалуйста."
+# Phrases written in code are gender-neutral (no «расслышал/расслышала»): the agent's gender is a
+# setting (AGENT_GENDER), and code must not depend on it. A test guards this.
+ASK_TO_REPEAT = "Простите, плохо слышно. Повторите, пожалуйста."
 FINAL_APOLOGY = (
     "Извините, у нас возникли технические неполадки. Администратор перезвонит вам. До свидания."
 )
 
 # Said when a turn fails AFTER a tool saved something (a booking, a message): the caller must
-# never hear «не расслышал» about a request that was in fact taken. Neutral wording; it does not
+# never hear «плохо слышно» about a request that was in fact taken. Neutral wording; it does not
 # say which request, so it is safe whatever tool committed.
 COMMITTED_FALLBACK = (
     "Ваша просьба принята и передана администратору, он свяжется с вами. Могу ещё чем-то помочь?"
@@ -82,7 +82,7 @@ class CallSession:
     def greet(self) -> list[Say]:
         """The opening line, as sentences to speak. Also tells the model it was said."""
         self._engine.add_assistant_message(self._greeting)
-        return [Say(sentence) for sentence in split_sentences(self._greeting)]
+        return [Say(sentence, scripted=True) for sentence in split_sentences(self._greeting)]
 
     async def handle(self, user_text: str) -> AsyncIterator[SessionEvent]:
         """One caller utterance in, the agent's reaction out (fallback phrases included)."""
@@ -105,18 +105,18 @@ class CallSession:
                 self._failed_in_a_row = 0
                 self._engine.add_assistant_message(COMMITTED_FALLBACK)
                 for sentence in split_sentences(COMMITTED_FALLBACK):
-                    yield Say(sentence)
+                    yield Say(sentence, scripted=True)
                 return
             self._failed_in_a_row += 1
             logger.warning("turn failed (%d in a row): %s", self._failed_in_a_row, exc)
             yield TurnFailed(str(exc), self._failed_in_a_row)
             if self._failed_in_a_row < self._max_failed_turns:
-                yield Say(ASK_TO_REPEAT)
+                yield Say(ASK_TO_REPEAT, scripted=True)
                 return
             await self._save_callback()
             self.ended = True
             for sentence in split_sentences(FINAL_APOLOGY):
-                yield Say(sentence)
+                yield Say(sentence, scripted=True)
             yield EndCall()
         else:
             self._failed_in_a_row = 0

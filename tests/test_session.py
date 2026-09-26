@@ -1,5 +1,6 @@
 """Offline tests for CallSession: greeting, pass-through, and the LLM-failure policy."""
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -362,10 +363,23 @@ def test_the_committed_fallback_is_neutral_and_says_nothing_about_not_hearing():
 # --- The phrases ----------------------------------------------------------------------------------
 
 
-def test_fallback_phrases_use_masculine_forms_to_be_matched_with_the_tts_voice():
-    """Documented on purpose: «не расслышал» is masculine. Step 2 must pick a matching voice
-    or change this phrase."""
-    assert "не расслышал" in ASK_TO_REPEAT
+# First-person past-tense forms that would tie a phrase to one gender of the voice.
+GENDERED_SELF = re.compile(
+    r"\b(?:расслышал|расслышала|понял|поняла|принял|приняла|записал|записала|передал|передала"
+    r"|отправил|отправила|извинился|извинилась)\b",
+    re.I,
+)
+
+
+def test_the_fallback_phrase_is_gender_neutral():
+    assert ASK_TO_REPEAT == "Простите, плохо слышно. Повторите, пожалуйста."
+
+
+@pytest.mark.parametrize(
+    "phrase", [ASK_TO_REPEAT, FINAL_APOLOGY, COMMITTED_FALLBACK, *GUARD_FALLBACKS.values()]
+)
+def test_phrases_written_in_code_never_name_the_agents_gender(phrase):
+    assert not GENDERED_SELF.search(phrase)
 
 
 @pytest.mark.parametrize(
@@ -386,3 +400,29 @@ async def test_blocked_sentences_reach_the_front_end_and_are_not_a_failed_turn()
 
     assert events == [SentenceBlocked("written_down", "Хорошо, записал."), Say("Как вас зовут?")]
     assert not session.ended
+
+
+def test_the_greeting_from_the_business_config_is_gender_neutral():
+    from pathlib import Path
+
+    from agent.business import load_business_config
+
+    greeting = load_business_config(Path("config/business.yaml")).greeting
+    assert not GENDERED_SELF.search(greeting)
+
+
+# --- Which sentences the code wrote -----------------------------------------------------------
+
+
+def test_the_greeting_is_scripted():
+    session, _, _, _ = make_session()
+    assert session.greet() and all(say.scripted for say in session.greet())
+
+
+async def test_the_fallback_phrases_are_scripted_and_the_models_own_words_are_not():
+    session, _, _, _ = make_session(text("Слушаю вас."), failing_round(), failing_round())
+    fine = await turn(session, "Алло")
+    failed = await turn(session, "Записаться")
+
+    assert [e.scripted for e in fine if isinstance(e, Say)] == [False]
+    assert [e.scripted for e in failed if isinstance(e, Say)] == [True]

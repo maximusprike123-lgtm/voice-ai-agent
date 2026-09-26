@@ -150,7 +150,7 @@ async def sweep(
 ) -> list[Graded]:
     business = load_business_config(settings.business_config_path)
     now = fixed_now(settings)
-    ctx = CheckContext(business, now)
+    ctx = CheckContext(business, now, settings.agent_gender)
     clock = lambda: now  # noqa: E731
     jobs = [(scenario, i) for i in range(runs) for scenario in scenarios]  # round-robin
     semaphore = asyncio.Semaphore(concurrency)

@@ -1065,3 +1065,36 @@ async def test_the_engine_passes_the_callers_words_to_the_tools():
     await collect(engine, "Да")
 
     assert seen == ["Меня зовут Игорь", "Да"]
+
+
+# --- Which sentences the code wrote -----------------------------------------------------------
+
+
+def test_a_say_is_the_same_sentence_whoever_wrote_it():
+    assert Say("Да.", scripted=True) == Say("Да.")
+    assert Say("Да.", scripted=True).scripted and not Say("Да.").scripted
+
+
+async def test_model_sentences_are_not_scripted_but_tool_says_are():
+    tools = FakeTools(
+        {"prepare_booking": ToolOutcome("ok", say="Проверьте, пожалуйста. Всё верно?")}
+    )
+    engine, _, _ = make_engine(
+        tool_turn(ToolCall("c1", "prepare_booking", "{}"), before="Хорошо, сейчас."), tools=tools
+    )
+
+    says = [e for e in await collect(engine, "x") if isinstance(e, Say)]
+
+    assert [(s.text, s.scripted) for s in says] == [
+        ("Хорошо, сейчас.", False),
+        ("Проверьте, пожалуйста.", True),
+        ("Всё верно?", True),
+    ]
+
+
+async def test_the_guard_fallback_is_scripted():
+    engine, _, _ = make_engine(text("Хорошо, записал."), text("Хорошо, записал."))
+
+    says = [e for e in await collect(engine, "x") if isinstance(e, Say)]
+
+    assert [s.scripted for s in says] == [True]
