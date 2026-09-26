@@ -18,6 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+silero = [
+    "torch>=2.0",  # the local fallback voice (agent.speech.silero_tts)
+    "scipy",  # imported by the Silero model package
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

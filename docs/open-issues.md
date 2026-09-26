@@ -128,4 +128,13 @@ routing, guardrails, infra noise) are in [latency.md](latency.md). Eval history 
   giving `LLMClient.stream()` a per-attempt routing override, and re-measure the stall rate and
   the p90 from the production VPS (see also latency.md). Until then evals and calls see about one
   stalled request in fourteen.
+- **ElevenLabs TTS is untested against the real service (2.1.d).** Only `httpx.MockTransport` tests exist;
+  the first real run needs a key, a voice id (`scripts/check_tts.py voices`) and reachability from wherever
+  it runs. Until then every call is spoken by the Silero fallback.
+- **A hanging primary costs one sentence the whole timeout (1.5 s) per pause (60 s)**, because the probe is
+  a real sentence. Measured with a fake hanging primary: 1549 ms to the first audio for that sentence. If it
+  matters: probe with a tiny background request instead, or race the fallback against the primary.
+- **Silero speaker genders are unknown** (`aidar`/`eugene` male and `baya`/`kseniya`/`xenia` female are only
+  a guess from the names): the defaults `SILERO_SPEAKER_MALE=aidar`, `_FEMALE=xenia` must be confirmed by
+  ear from `data/tts_samples/`.
 

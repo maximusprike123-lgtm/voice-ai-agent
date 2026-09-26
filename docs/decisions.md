@@ -283,3 +283,36 @@ Latin, dates, times, all services, notes with digits) and requires that none tri
 Known limits: years («две тысячи пятнадцать года»), «две недели» (feminine numerals), numbers over 999999
 (read digit by digit), unknown Latin words (transliterated with a warning).
 
+## Step 2.1.d (2026-09-26): TTS clients, without an ElevenLabs key
+
+`agent.speech.tts`: `TTSClient` (one sentence -> 8 kHz mono PCM16 chunks; `unconfigured_reason`, `warm_up`,
+`synthesize`, `aclose`), `TtsError`, `FailoverTTS` (primary + local fallback; a primary that is unconfigured,
+errors, or gives no first audio within 1.5 s loses THAT sentence and pauses for 60 s; the next sentence after
+the pause is the probe; a primary that dies after audio started is never replaced mid-sentence: the rest is
+dropped, the next sentence goes to the fallback; the fallback failing raises). `build_tts(settings)` builds it
+(no failover when the fallback is "none" or the same provider). Settings: `TTS_PROVIDER` (default elevenlabs),
+`TTS_FALLBACK_PROVIDER` (silero), `TTS_FIRST_CHUNK_TIMEOUT_SECONDS`, `TTS_PRIMARY_PAUSE_SECONDS`,
+`ELEVENLABS_*` (key as SecretStr, base URL for a regional/proxy endpoint, voice per gender, model),
+`SILERO_*` (model, speaker per gender, cache dir); blank `.env` values mean «not set».
+**ElevenLabs** (`elevenlabs_tts.py`): the HTTP streaming endpoint (`/v1/text-to-speech/{voice}/stream`,
+`output_format=pcm_8000`), NOT the WebSocket planned in 2.0: our sentences arrive whole, the first audio comes as
+fast, the connection is reused, and the end of a sentence is the end of the response (a WebSocket carrying
+several sentences has no per-sentence end marker; it stays an option for token streaming and for STT). The key
+goes only in the `xi-api-key` header, never in a URL, error, log or `repr` (tests); without a key or a voice the
+client reports «key: not set» / «voice: not set» and makes no request. `list_voices` (v2 search, paginated,
+language filter, free of charge). Tested only against `httpx.MockTransport`: NOT yet against the real service.
+**Silero** (`silero_tts.py`): our own loader instead of the `silero` pip package (which downloads a listing
+into the working directory and models into site-packages): `models.yml` and the models live in `data/silero/`
+(git-ignored, 336 MB for v5_ru + two cis_base), loaded with `torch.package`; needs torch and scipy (the model
+package imports it); renders straight at 8 kHz; one sentence at a time (lock); `warm_up` loads and primes the
+model with a short sentence (the first real synthesis was 794 ms, then ~100-240 ms). Measured on this Mac
+(CPU): 4-13 s of speech in 100-240 ms (~55x real time), model load 3.2 s (54 s the very first time: imports
+and disk cache). With a fake broken primary in front of the real Silero: an erroring primary costs nothing
+(37 ms to the first audio), a HANGING primary costs the whole timeout once per pause (1549 ms for that one
+sentence, then 59 ms while paused).
+`scripts/check_tts.py`: `check` (each voice + the failover: warm-up, first audio, total, wav files in
+`data/tts_check/`), `samples` (Silero voices as `*_phone.wav` through the telephone line and `*_24k.wav`, plus
+`data/tts_samples/INDEX.txt`), `voices` (ElevenLabs voice list). Silero v5_cis_base has 60 voices named
+`<language>_<name>`; the 29 `ru_*` ones speak Russian natively. Voice genders are not documented anywhere:
+by ear.
+

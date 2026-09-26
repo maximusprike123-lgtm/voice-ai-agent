@@ -37,6 +37,26 @@ class Settings(BaseSettings):
     # the prompt («я понял» / «я поняла»). Phrases written in code stay gender-neutral.
     agent_gender: Literal["male", "female"] = "male"
 
+    # --- Speech output (TTS): a primary and a local fallback, both behind TTSClient -------------
+    tts_provider: Literal["elevenlabs", "silero"] = "elevenlabs"
+    # The provider used when the primary fails or is not configured; "none" = no fallback.
+    tts_fallback_provider: Literal["elevenlabs", "silero", "none"] = "silero"
+    # A primary that gives no first audio within this time loses the sentence to the fallback,
+    # and then sits out `tts_primary_pause_seconds` before it is tried again.
+    tts_first_chunk_timeout_seconds: float = Field(default=1.5, gt=0)
+    tts_primary_pause_seconds: float = Field(default=60.0, ge=0)
+    # ElevenLabs: without a key the provider reports "key: not set" and the fallback speaks.
+    elevenlabs_api_key: SecretStr | None = None
+    elevenlabs_base_url: str = "https://api.elevenlabs.io"  # a regional or proxy endpoint
+    elevenlabs_voice_male: str | None = None
+    elevenlabs_voice_female: str | None = None
+    elevenlabs_tts_model: str = "eleven_flash_v2_5"
+    # Silero (local): model v5_ru has 5 voices; v5_cis_base is the MIT-licensed base model.
+    silero_model: str = "v5_ru"
+    silero_cache_dir: Path = Path("data/silero")  # downloaded models (git-ignored)
+    silero_speaker_male: str = "aidar"
+    silero_speaker_female: str = "xenia"
+
     telegram_bot_token: SecretStr = Field(min_length=1)
     telegram_chat_id: str = Field(min_length=1)
 
@@ -69,9 +89,39 @@ class Settings(BaseSettings):
             raise ValueError(f"unknown time zone: {value!r}") from exc
         return value
 
+    @field_validator("elevenlabs_api_key", "elevenlabs_voice_male", "elevenlabs_voice_female")
+    @classmethod
+    def _blank_is_unset(cls, value):
+        """`KEY=` in .env means "not set", not an empty key."""
+        if value is None:
+            return None
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        return value if raw.strip() else None
+
+    @field_validator("elevenlabs_base_url")
+    @classmethod
+    def _check_elevenlabs_url(cls, value: str) -> str:
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("must start with http:// or https://")
+        return value.rstrip("/")
+
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
+
+    @property
+    def elevenlabs_voice_id(self) -> str | None:
+        """The ElevenLabs voice for the agent's gender, if one is configured."""
+        if self.agent_gender == "male":
+            return self.elevenlabs_voice_male
+        return self.elevenlabs_voice_female
+
+    @property
+    def silero_speaker(self) -> str:
+        """The Silero speaker for the agent's gender."""
+        if self.agent_gender == "male":
+            return self.silero_speaker_male
+        return self.silero_speaker_female
 
 
 @lru_cache

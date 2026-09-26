@@ -69,14 +69,15 @@ see docs/evals.md). ~1080 offline tests. Post-tag follow-ups are done, and so ar
 `dictates_other_number`; the false failures of the phone checks fixed offline); details in docs/.
 **Step 1 is closed for good.**
 
-**STEP 2 (voice) IN PROGRESS.** Done: 2.1.a (`AGENT_GENDER` setting, prompt line, neutral code phrases),
-2.1.b (`agent.speech`: G.711, resampler, phone-line simulation, WAV, pacing), 2.1.c (text before TTS:
-numbers/Latin to words + speech guard); ~1420 tests. Decisions: TTS ElevenLabs (fallback Silero v5), STT
-ElevenLabs vs T-one to compare; details in docs/. Next: 2.1.d (TTS clients), needs a cost estimate first.
+**STEP 2 (voice) IN PROGRESS.** Done: 2.1.a (`AGENT_GENDER`, prompt line, neutral code phrases), 2.1.b
+(`agent.speech`: G.711, resampler, phone-line simulation), 2.1.c (text before TTS: numbers/Latin + guard),
+2.1.d (TTS: `TTSClient`, `FailoverTTS`, Silero fallback measured, ElevenLabs client tested only against a
+mock: no key yet); ~1510 tests. Decisions: TTS ElevenLabs (fallback Silero v5), STT ElevenLabs vs T-one to
+compare; details in docs/. Next: 2.1.e (STT clients).
 
 Code map: `src/agent/{dialogue,session,app,cli,tools,grounding,records,storage,notifier,text_guard,
-ru_words,prompt,llm,settings,business}.py`, `src/agent/speech/{audio,g711,resample,text}.py`, `evals/`,
-`scripts/`, `config/business.yaml`.
+ru_words,prompt,llm,settings,business}.py`, `src/agent/speech/{audio,g711,resample,text,tts,
+silero_tts,elevenlabs_tts,factory}.py`, `evals/`, `scripts/`, `config/business.yaml`.
 
 **Roadmap:** step 2 (STT/TTS, local mic), then step 3 (Asterisk + AudioSocket on the real VPS;
 adds `call_id` as SQLite migration 2, and `mark_spoken`).
