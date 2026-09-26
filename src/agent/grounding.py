@@ -8,7 +8,7 @@ module: did the caller really say this number / this name? Only the caller's own
 
 import re
 
-from agent.ru_words import spoken_digits
+from agent.ru_words import spoken_digit_runs
 
 _WORD_RE = re.compile(r"[а-яёa-z]+")
 MIN_NAME_PREFIX = 3
@@ -39,11 +39,33 @@ class CallerSpeech:
     def __init__(self) -> None:
         self._digits: list[str] = []  # the digits of each utterance
         self._words: set[str] = set()
+        self._runs: list[str] = []  # runs of digits said in a row, and the pieces joined
+        self._chain: str | None = None  # a run that touched the end of the last utterance
 
     def add(self, utterance: str) -> None:
-        if digits := spoken_digits(utterance):
+        runs = spoken_digit_runs(utterance)
+        if digits := "".join(run.digits for run in runs):
             self._digits.append(digits)
         self._words.update(_words(utterance))
+
+        # A number dictated in pieces (the speech-to-text cuts at pauses) is a run that ends one
+        # utterance and a run that starts the next. Both the pieces and the joined run are kept:
+        # «в 14:00» followed by «8 916 123 45 67» must not swallow the number.
+        continuing = self._chain is not None and bool(runs) and runs[0].at_start
+        chain = None
+        for index, run in enumerate(runs):
+            self._runs.append(run.digits)
+            if index == 0 and continuing:
+                chain = f"{self._chain}{run.digits}"
+                self._runs.append(chain)
+            else:
+                chain = run.digits
+        self._chain = chain if runs and runs[-1].at_end else None
+
+    def dictated_numbers(self) -> list[str]:
+        """Runs of digits the caller said in a row, in the order they were said (a number
+        dictated in pieces also appears joined). Not all of them are phone numbers."""
+        return list(self._runs)
 
     def said_phone(self, phone: str) -> bool:
         """Do the digits of `phone` (any format, +7/8 prefix ignored) occur in what the caller

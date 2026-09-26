@@ -1178,12 +1178,18 @@ async def test_take_message_refuses_a_half_made_up_phone_too(business, sink):
     assert is_error(outcome) and sink.messages == []
 
 
-async def test_take_message_accepts_a_phone_that_was_said_or_the_caller_id(business, sink):
+async def test_take_message_accepts_a_phone_that_was_said(business, sink):
     tools = registry(business, sink, caller_phone="+79991234567", heard="Мой номер 916 123 45 67")
 
     assert not is_error(await call(tools, "take_message", {"message": "a", "phone": "9161234567"}))
+    assert sink.messages[0].phone == "+79161234567"
+
+
+async def test_take_message_accepts_the_caller_id_without_dictation(business, sink):
+    tools = registry(business, sink, caller_phone="+79991234567", heard="Перезвоните мне")
+
     assert not is_error(await call(tools, "take_message", {"message": "b", "phone": "89991234567"}))
-    assert [m.phone for m in sink.messages] == ["+79161234567", "+79991234567"]
+    assert sink.messages[0].phone == "+79991234567"
 
 
 async def test_take_message_saves_without_a_name_the_caller_never_said(business, sink, caplog):
@@ -1206,3 +1212,115 @@ async def test_the_registry_hears_the_caller_through_the_engine(business, sink):
 
     [result] = [e for e in events if isinstance(e, ToolResult)]
     assert result.result.startswith(ERROR_PREFIX) and "phone:" in result.result
+
+
+# --- The caller dictated another number than the caller ID -----------------------------------
+
+WIFE = "8 903 555 12 34"  # +79035551234
+CALLER_ID = "+79991234567"
+
+
+def conflict_registry(business, sink, *heard, caller_phone=CALLER_ID):
+    tools = registry(business, sink, caller_phone=caller_phone, heard=heard[0])
+    for utterance in heard[1:]:
+        tools.begin_turn(utterance)
+    return tools
+
+
+async def test_the_caller_id_is_refused_when_another_number_was_dictated(business, sink):
+    tools = conflict_registry(business, sink, f"Меня зовут Игорь, запишите на номер жены {WIFE}")
+
+    outcome = await prepare(tools, phone=CALLER_ID)
+
+    assert is_error(outcome) and "называл другой номер" in outcome.result
+    assert not any(ch.isdigit() for ch in outcome.result.split(":", 2)[-1])  # no digits told back
+    assert outcome.say is None and is_error(await confirm(tools))  # nothing was prepared
+
+
+async def test_the_dictated_number_itself_goes_through(business, sink):
+    tools = conflict_registry(business, sink, f"Меня зовут Игорь, запишите на номер жены {WIFE}")
+
+    outcome = await prepare(tools, phone=WIFE)
+
+    assert not is_error(outcome)
+
+
+async def test_the_same_refusal_in_the_same_turn_is_repeated(business, sink):
+    tools = conflict_registry(business, sink, f"Меня зовут Игорь, номер жены {WIFE}")
+    assert is_error(await prepare(tools, phone=CALLER_ID))
+
+    assert is_error(await prepare(tools, phone=CALLER_ID))
+
+
+async def test_the_caller_id_is_accepted_once_the_caller_spoke_again(business, sink, caplog):
+    tools = conflict_registry(business, sink, f"Меня зовут Игорь, номер жены {WIFE}")
+    assert is_error(await prepare(tools, phone=CALLER_ID))
+    tools.begin_turn("Нет, запишите на тот, с которого я звоню")
+
+    with caplog.at_level("WARNING"):
+        assert not is_error(await prepare(tools, phone=CALLER_ID))
+    assert "accepted on retry" in caplog.text
+
+
+async def test_a_new_dictated_number_is_refused_again(business, sink):
+    tools = conflict_registry(business, sink, f"Меня зовут Игорь, номер жены {WIFE}")
+    assert is_error(await prepare(tools, phone=CALLER_ID))
+    tools.begin_turn("Ой, нет, лучше на мой рабочий: 8 495 000 11 22")
+
+    assert is_error(await prepare(tools, phone=CALLER_ID))  # a different number, a new refusal
+
+
+async def test_the_latest_dictated_number_decides(business, sink):
+    tools = conflict_registry(
+        business, sink, f"Меня зовут Игорь, номер жены {WIFE}", "Нет, запишите на 8 999 123 45 67"
+    )
+
+    assert not is_error(await prepare(tools, phone=CALLER_ID))  # the last one IS the caller ID
+
+
+async def test_a_number_dictated_in_pieces_counts(business, sink):
+    tools = conflict_registry(
+        business,
+        sink,
+        "Меня зовут Игорь, номер жены девятьсот три",
+        "пятьсот пятьдесят пять",
+        "двенадцать тридцать четыре",
+    )
+
+    outcome = await prepare(tools, phone=CALLER_ID)
+
+    assert is_error(outcome) and "называл другой номер" in outcome.result
+
+
+async def test_a_time_before_the_number_does_not_hide_it(business, sink):
+    tools = conflict_registry(business, sink, "Меня зовут Игорь, завтра на 14:00", f"Номер {WIFE}")
+
+    assert is_error(await prepare(tools, phone=CALLER_ID))
+
+
+async def test_times_and_dates_are_not_taken_for_a_number(business, sink):
+    tools = conflict_registry(
+        business,
+        sink,
+        "Меня зовут Игорь, 19 сентября в 14:00, Камри 2015 года, номер 8 999 123 45 67",
+    )
+
+    assert not is_error(await prepare(tools, phone=CALLER_ID))
+
+
+async def test_no_conflict_without_a_caller_id(business, sink):
+    tools = conflict_registry(business, sink, f"Меня зовут Игорь, номер {WIFE}", caller_phone=None)
+
+    assert not is_error(await prepare(tools, phone=WIFE))
+
+
+async def test_take_message_refuses_the_caller_id_too(business, sink):
+    tools = conflict_registry(business, sink, f"Перезвоните на {WIFE}")
+
+    outcome = await call(tools, "take_message", {"message": "Перезвоните", "phone": CALLER_ID})
+
+    assert is_error(outcome) and "называл другой номер" in outcome.result and sink.messages == []
+    tools.begin_turn("на тот, с которого звоню")
+    assert not is_error(
+        await call(tools, "take_message", {"message": "Перезвоните", "phone": CALLER_ID})
+    )

@@ -3,6 +3,7 @@ from datetime import date, time
 import pytest
 
 from agent.ru_words import (
+    DigitRun,
     cardinal,
     date_on_phrase,
     date_words,
@@ -11,6 +12,7 @@ from agent.ru_words import (
     longest_number_run,
     plural_form,
     spoken_amounts,
+    spoken_digit_runs,
     spoken_digits,
     time_words,
 )
@@ -244,3 +246,45 @@ def test_spoken_digits_does_not_glue_numerals_that_cannot_belong_together():
     assert spoken_digits("сорок двадцать") == "4020"
     assert spoken_digits("пять пять") == "55"
     assert spoken_digits("сто двести") == "100200"
+
+
+# --- spoken_digit_runs --------------------------------------------------------------------------
+
+
+def runs(text):
+    return [(r.digits, r.at_start, r.at_end) for r in spoken_digit_runs(text)]
+
+
+def test_a_run_is_broken_by_any_other_word_but_not_by_separators():
+    assert runs("+7 (916) 123-45-67") == [("79161234567", True, True)]
+    assert runs("завтра в 14:00, номер 8 916 123 45 67") == [
+        ("1400", False, False),
+        ("89161234567", False, True),
+    ]
+
+
+def test_a_run_of_number_words_and_digits_is_one_run():
+    assert runs("восемь 916 сто двадцать три") == [("8916123", True, True)]
+
+
+def test_time_with_a_colon_is_two_pieces_of_one_run():
+    assert runs("в 14:00") == [("1400", False, True)]
+
+
+def test_at_start_and_at_end_mark_the_edges_of_the_utterance():
+    assert runs("8 916 123") == [("8916123", True, True)]
+    assert runs("номер 8 916") == [("8916", False, True)]
+    assert runs("8 916 это номер") == [("8916", True, False)]
+    assert runs("да") == []
+
+
+def test_plus_and_latin_words_and_the_word_plus():
+    assert runs("плюс семь девятьсот шестнадцать") == [("7916", True, True)]
+    assert runs("Camry 2015") == [("2015", False, True)]
+    assert runs("2015 Camry") == [("2015", True, False)]
+
+
+def test_spoken_digits_is_the_runs_joined():
+    text = "в 14:00, номер восемь девятьсот шестнадцать 123 45 67, Камри 2015"
+    assert spoken_digits(text) == "".join(r.digits for r in spoken_digit_runs(text))
+    assert isinstance(spoken_digit_runs(text)[0], DigitRun)

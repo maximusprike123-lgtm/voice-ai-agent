@@ -22,8 +22,9 @@ Details live in `docs/` (read the relevant file before working on that area):
 - **Don't touch unrelated files.** A step's edits should stay scoped to what that step needs.
 - Every step ends with passing tests (`pytest`) and a clean lint (`ruff check .`).
 - **Language:** talk to me in Russian. Code, code comments, CLAUDE.md and `docs/` stay in English.
-- **Eval runs:** run `python -m evals` sweeps estimated at up to $0.50 without asking (check with
-  `--dry-run`); ask first if the estimate is higher.
+- **Eval runs:** a sweep I decide to run myself: up to $0.50 without asking, ask first if the
+  estimate is higher. A sweep you ask for explicitly is already allowed at any price. Either
+  way, show the `--dry-run` cost estimate BEFORE starting it.
 - **End of a step:** in CLAUDE.md update only the status and one or two lines; write the
   details into the relevant file in `docs/`.
 
@@ -62,9 +63,10 @@ audio-agnostic booking agent: DialogueEngine + CallSession + tools + SQLite + Te
 CLI, code-enforced guarantees (two-step booking, code-built read-back/acceptance, `end_call` and
 same-turn-confirm guards, speech guard with `role_leakage`), and an eval harness (`python -m evals`)
 with a measured result: **95/99 = 96%** raw pass rate, 10 runs per scenario (old agent 76/95 = 80%;
-see docs/evals.md). ~1050 offline tests. Post-tag follow-ups are done, and so is **step 1.11**
-(role leakage drops the round's tool calls; tools refuse a phone/name the caller never said; sweep
-84/87 = 97%, details in docs/).
+see docs/evals.md). ~1080 offline tests. Post-tag follow-ups are done, and so are **step 1.11**
+(role leakage drops the round's tool calls; tools refuse a phone/name the caller never said) and
+**step 1.12** (the caller ID is refused once when another number was dictated; new eval scenario
+`dictates_other_number`); details and sweeps in docs/.
 
 Code map: `src/agent/{dialogue,session,app,cli,tools,grounding,records,storage,notifier,text_guard,
 ru_words,prompt,llm,settings,business}.py`, `evals/`, `scripts/`, `config/business.yaml`.
@@ -87,9 +89,11 @@ adds `call_id` as SQLite migration 2, and `mark_spoken`).
 - **TTS voice gender** must match the masculine fallback phrases (`ASK_TO_REPEAT` etc.) and the
   model's gendered wording; state the agent's gender in the prompt once the voice is chosen.
 - **Model still slips:** writes «записал» (blocked by the guard) and recaps before `prepare_booking`
-  (13%); hidden-ID «этот номер» offer 1/10; dictated number vs caller ID not enforced in code.
-- **Dictated number vs caller ID** is still not enforced in code (1/10 runs); planned as its own
-  step with its own sweep (see docs/open-issues.md, (6)).
+  (13%); hidden-ID «этот номер» offer 1/10.
+- **Together stalls on the first token in ~7% of requests, and the engine's retry goes to the same
+  provider** (details in docs/open-issues.md); step 2 idea: retry via Fireworks. Not done.
+- **Eval artifact:** `saved_phone_is_the_dictated_number` fails when the simulated caller itself chooses
+  «с которого я звоню» (sunday_closed, ~1/10); fix proposed, not done (docs/evals.md, Step 1.12).
 - **Foreign-script chars** (Chinese on qwen3.5): `foreign_script_chars()` guard exists in the
   speech guard; step 2 must decide behavior before TTS.
 - **Conversation-level rule compliance** is model-dependent; run several evals, not one dialogue.

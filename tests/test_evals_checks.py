@@ -500,6 +500,7 @@ def test_the_scenario_list_is_what_was_agreed():
         "rude_offtopic",
         "address_only",
         "sunday_closed",
+        "dictates_other_number",
     ]
     assert set(BY_ID) == {s.id for s in SCENARIOS}
 
@@ -632,7 +633,23 @@ def ideal(scenario_id) -> RunResult:
             preferred_time=time(12, 0),
         )
         return make_run(items, bookings)
+    if scenario_id == "dictates_other_number":
+        items, bookings = booked(
+            [say(1, "Записать заявку на номер, который вы назвали?")], phone="+79035551234"
+        )
+        return make_run(items, bookings)
     raise AssertionError(scenario_id)
+
+
+def test_the_caller_id_saved_instead_of_the_wifes_number_fails_the_scenario():
+    scenario = BY_ID["dictates_other_number"]
+    run = ideal("dictates_other_number")
+    run.caller_lines[:] = ["Я Игорь, запишите на номер жены 8 903 555 12 34"]
+    assert [r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed] == []
+
+    run.bookings[:] = [booking(phone="+79991234567")]
+    failed = {r.name for r in c.grade(run, scenario.checks, CTX) if not r.passed}
+    assert failed == {"phone_ok", "saved_phone_is_the_dictated_number"}
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.id)

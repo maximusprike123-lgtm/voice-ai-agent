@@ -83,9 +83,13 @@ routing, guardrails, infra noise) are in [latency.md](latency.md). Eval history 
   colloquial numerals («двойка», «две девятки») are not understood; the name match has no
   diminutive dictionary; `car`, `service_id`, dates are still not checked (the read-back is the
   net). Not measured by the scenarios (they never fired, see evals.md).
-  **Still open, planned as its own step with its own sweep (step (б)):** the model passes the caller ID
-  although the caller dictated another number (`saved_phone_is_the_dictated_number`, 1/10 runs in
-  both sweeps). Idea: refuse the caller ID once when a full different number was dictated.
+  **Step (б) DONE (step 1.12, 2026-09-26): the caller ID is refused once when the caller dictated
+  a different full number.** `CallerSpeech.dictated_numbers()` (runs of digits said in a row; the
+  pieces of a number dictated in several utterances are also kept joined; exact 10-11 digit runs
+  only, so «14:00, 8 916…» with no word between them is missed) and `ToolRegistry._phone_conflict`
+  in `prepare_booking` / `take_message`: error «клиент называл другой номер» once per dictated
+  number, a repeat after the caller spoke again goes through. Sweep results and the caveat that
+  the failures it was meant to remove were mostly eval artifacts: docs/evals.md (Step 1.12 sweep).
   (7) `acceptance_claim` never fired in the 200 runs of the final comparison
   (it happened once in ~250 earlier): rare but the guard covers it.
 - **Background-process gotcha for long sweeps in this environment:** a sweep started with a
@@ -97,3 +101,14 @@ routing, guardrails, infra noise) are in [latency.md](latency.md). Eval history 
   `own_recap_before_prepare` (19/50 runs); not fixed.
 - **Empty model reply:** now handled (1.9): the engine retries once, then raises `LLMError`,
   and `CallSession` says the fallback phrase. (Seen once on qwen3.5:4b.)
+- **Together stalls on the first token, and the retry goes to the same provider (found 2026-09-26,
+  not fixed).** In the grounding sweep (`data/evals/grounding10`) 33 of 468 agent requests (7%, max
+  27s) got no first event within the 4s limit; 13 of 100 runs ended as infra errors, most of them
+  in the first runs of a scenario. `LLM_EXTRA_BODY` routes `order: [Together, Fireworks]`, so the
+  engine's single retry (`DialogueEngine`, same `LLMClient.stream()` call) starts at Together again
+  and can stall again; Fireworks is only reached on a provider error, not on a slow first token.
+  Idea for step 2 (NOT done now): send the retry to another provider (Fireworks first), e.g. by
+  giving `LLMClient.stream()` a per-attempt routing override, and re-measure the stall rate and
+  the p90 from the production VPS (see also latency.md). Until then evals and calls see about one
+  stalled request in fourteen.
+

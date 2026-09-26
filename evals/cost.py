@@ -36,6 +36,7 @@ ESTIMATED_TOKENS_PER_RUN: dict[str, dict[str, tuple[int, int]]] = {
     "hidden_caller_id": BOOKING_RUN,
     "service_not_listed": BOOKING_RUN,
     "sunday_closed": BOOKING_RUN,
+    "dictates_other_number": BOOKING_RUN,
     "question_outside_faq": MEDIUM_RUN,
     "rude_offtopic": MEDIUM_RUN,
     "address_only": MEDIUM_RUN,

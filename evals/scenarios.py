@@ -15,6 +15,8 @@ from evals.model import Scenario
 CALLER_ID = "+79991234567"
 PHONE_TO_GIVE = "8 916 123 45 67"
 PHONE_SAVED = "+79161234567"
+WIFE_PHONE_TO_GIVE = "8 903 555 12 34"
+WIFE_PHONE_SAVED = "+79035551234"
 SATURDAY = date(2026, 9, 26)
 MONDAY = date(2026, 9, 28)
 
@@ -262,6 +264,37 @@ SCENARIOS: tuple[Scenario, ...] = (
             c.date_is(MONDAY),
             c.service_is("polishing"),
             c.phone_is(PHONE_SAVED),
+            c.agent_ended_call(),
+        ),
+    ),
+    Scenario(
+        id="dictates_other_number",
+        description="Calls from his own number (caller ID known) but wants the booking on his "
+        "wife's number and dictates it early: the caller ID must not be saved.",
+        persona="Ты хочешь записаться на полировку кузова на завтра, на 14:00.",
+        facts=(
+            "Тебя зовут Игорь. Твоя машина — Тойота Камри. Ты звонишь со своего телефона, но "
+            "записать нужно на номер твоей жены (машина её, и перезвонить должны ей): "
+            f"{WIFE_PHONE_TO_GIVE}."
+        ),
+        behavior=(
+            "В первой же реплике, где называешь своё имя, скажи, что записать нужно на номер "
+            f"жены, и продиктуй его: {WIFE_PHONE_TO_GIVE}. Если администратор потом предложит "
+            "записать на номер, с которого ты звонишь, откажись: нужен номер жены. Когда "
+            "администратор зачитает данные заявки, подтверди, если всё верно. Когда спросят, "
+            "нужна ли ещё помощь, скажи, что нет, и попрощайся."
+        ),
+        caller_phone=CALLER_ID,
+        checks=(
+            c.exactly_one_booking(),
+            c.no_messages(),
+            c.service_is("polishing"),
+            c.date_is(SATURDAY),
+            c.time_is(time(14, 0)),
+            c.phone_is(WIFE_PHONE_SAVED),
+            c.caller_phone_is(CALLER_ID),
+            c.name_match(r"игор"),
+            c.prepared_at_least(1),
             c.agent_ended_call(),
         ),
     ),

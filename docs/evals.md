@@ -189,3 +189,29 @@ name, and the model does not invent them. The protection is covered by offline t
 these scenarios. Guard blocks: `written_down` 6 → 11 per 87 runs (same rate, all blocked),
 `acceptance_claim` 0 → 1. Warning `own_recap_before_prepare` 13 → 20 per 100 (noise at this n).
 
+## Step 1.12 sweep: the caller ID vs a dictated number (2026-09-26)
+
+New scenario **`dictates_other_number`** (caller ID known, the caller asks for the booking on his
+wife's number and dictates it in the same line as his name; checks: saved phone = the dictated one,
+caller ID stored separately). Sweeps of 10 runs per scenario, run at the same time:
+`data/evals/step_b_new` (new rule; dictates_other_number + hidden_caller_id + sunday_closed +
+happy_path_booking, $0.299) and `data/evals/step_b_base` (dictates_other_number on the previous
+commit in a temporary worktree, $0.062). Regression baseline = the same three old scenarios from
+`final_new10` + `grounding10` (20 runs each, identical for this behaviour).
+**The scenario does not reproduce the problem: the old code passes it 10/10** (the model uses the
+number it was told early), the new code 9/10 (the miss is `agent_ended_call`: goodbye said, no
+`end_call`; unrelated). Regression (`evals.compare step_b_regress_base step_b_new`): raw
+52/55 = 95% → 37/40 = 92%, 0 infra errors (5 before); happy_path 19/19 → 10/10, hidden_caller_id
+17/18 → 10/10, sunday_closed 16/18 → 8/10: noise at this n, explained below. **The rule fired twice,
+both in sunday_closed (runs 5 and 6), and both times worked as designed:** the model passed the caller
+ID, got «называл другой номер», asked «на какой номер записать?», and the caller answered
+«на номер, с которого я звоню» → the caller ID was accepted on the repeat and saved. Cost: one extra
+turn. **Those two runs (and the two identical ones in the earlier sweeps, `final_new10` #9 and
+`grounding10` #3) are false failures of the eval, not agent errors:** the simulated caller (whose
+persona says «откажись и назови свой номер») itself says «на номер, с которого я звоню — 8 916…»
+and the check `saved_phone_is_the_dictated_number` compares with the digits it read out.
+So no real «caller ID instead of the dictated number» agent error has been seen since the prompt
+pass; the rule is a safety net proven by offline tests, not by these sweeps. Proposed, NOT done:
+make `saved_phone_is_the_dictated_number` (and `phone_ok` in sunday_closed) skip a run whose
+last caller line about the number says «с которого я звоню».
+

@@ -11,7 +11,8 @@ ask the caller again.
 
 Grounding: the registry hears every caller utterance (begin_turn) and refuses a phone number the
 caller never said (the caller ID counts as said) and, once, a name the caller never said, so
-data the model made up cannot be saved (see agent.grounding).
+data the model made up cannot be saved (see agent.grounding). It also refuses, once, the caller ID
+when the caller dictated a different number.
 
 The tool schemas are static: nothing in them depends on the caller, the time or the call, so
 they never break a backend's prompt-prefix cache.
@@ -209,6 +210,7 @@ class ToolRegistry:
         self._confirmed_in_turn: int | None = None  # turn of the last accepted booking
         self._heard = CallerSpeech()  # what the caller has said in this call
         self._name_challenge: tuple[str, int] | None = None  # (name, turn) refused once
+        self._phone_challenge: tuple[str, int] | None = None  # (dictated number, turn) refused once
         self.specs = build_tool_specs(business)
         self._handlers = {
             "prepare_booking": self._prepare_booking,
@@ -284,12 +286,43 @@ class ToolRegistry:
             f"какой номер записать: попроси продиктовать его{offer}."
         )
 
+    def _latest_dictated_number(self) -> str | None:
+        """The last full phone number the caller dictated (as +7XXXXXXXXXX), if any."""
+        for digits in reversed(self._heard.dictated_numbers()):
+            if number := normalize_phone(digits):
+                return number
+        return None
+
+    def _phone_conflict(self, phone: str) -> str | None:
+        """The model passes the caller ID although the caller dictated another number: refused
+        once per dictated number (the caller may have changed their mind, and the model then
+        asks), so a repeat after the caller has spoken again goes through."""
+        caller = normalize_phone(self._caller_phone) if self._caller_phone else None
+        if caller is None or normalize_phone(phone) != caller:
+            return None
+        dictated = self._latest_dictated_number()
+        if dictated is None or dictated == caller:
+            return None
+        challenged = self._phone_challenge
+        if challenged is not None and challenged[0] == dictated and challenged[1] < self._turn:
+            logger.warning("the caller dictated another number; the caller ID accepted on retry")
+            return None
+        self._phone_challenge = (dictated, self._turn)
+        logger.warning("refused the caller ID: the caller dictated another number")
+        return (
+            "phone: клиент называл другой номер, не тот, с которого звонит. Не подставляй номер "
+            "звонящего сам. Уточни у клиента, на какой номер записать: на названный им или на "
+            "номер, с которого он звонит, и вызови инструмент снова с выбранным номером."
+        )
+
     def _ungrounded(self, fields: _Fields) -> list[str]:
         """Problems with data the caller never said: an empty list if there are none."""
         problems = []
         if not self._phone_was_said(fields.phone):
             logger.warning("prepare_booking refused: the phone was never said by the caller")
             problems.append(self._phone_not_said())
+        elif conflict := self._phone_conflict(fields.phone):
+            problems.append(conflict)
         if not self._heard.said_name(fields.name):
             key = fields.name.casefold()
             challenged = self._name_challenge
@@ -409,6 +442,8 @@ class ToolRegistry:
             return _error(
                 "сообщение НЕ передано. Исправь и вызови снова:\n- " + self._phone_not_said()
             )
+        if raw_phone and (conflict := self._phone_conflict(raw_phone)):
+            return _error("сообщение НЕ передано. Исправь и вызови снова:\n- " + conflict)
         if name and not self._heard.said_name(name):
             # The name is optional and the message matters more: save it without the name.
             logger.warning("take_message: name %r never said by the caller, dropped", name)

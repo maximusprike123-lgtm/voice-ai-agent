@@ -81,3 +81,48 @@ def test_the_name_was_not_said(said, given):
 
 def test_a_name_without_letters_is_not_checked():
     assert CallerSpeech().said_name("-")
+
+
+# --- dictated_numbers ---------------------------------------------------------------------
+
+
+def test_a_number_in_one_utterance_is_one_run():
+    assert heard("Запишите на 8 903 555 12 34").dictated_numbers() == ["89035551234"]
+
+
+def test_words_around_the_number_do_not_matter():
+    speech = heard("Меня зовут Игорь, Камри 2015 года, номер 8 903 555 12 34, на 14:00")
+    assert "89035551234" in speech.dictated_numbers()
+
+
+def test_pieces_at_the_edges_of_neighbouring_utterances_are_also_kept_joined():
+    numbers = heard("Мой номер 8 903", "555 12", "34 спасибо").dictated_numbers()
+
+    assert "8903" in numbers and "55512" in numbers and "890355512" in numbers
+    assert "8903555123" not in numbers  # the last piece is joined whole, not cut
+
+
+def test_the_whole_number_appears_joined_after_the_last_piece():
+    speech = heard("Мой номер 8 903", "555 12", "34")
+    assert speech.dictated_numbers()[-1] == "89035551234"
+
+
+def test_a_time_at_the_end_does_not_swallow_a_number_at_the_start_of_the_next_utterance():
+    speech = heard("Завтра на 14:00", "8 903 555 12 34")
+    numbers = speech.dictated_numbers()
+    assert "89035551234" in numbers  # the piece on its own
+    assert "140089035551234" in numbers  # and the (useless) joined run
+
+
+def test_an_utterance_without_digits_breaks_the_chain():
+    speech = heard("Мой номер 8 903", "да", "555 12 34")
+    assert all(len(n) < 10 for n in speech.dictated_numbers())
+
+
+def test_a_word_before_the_first_run_breaks_the_chain():
+    speech = heard("Мой номер 8 903", "и ещё 555 12 34")
+    assert all(len(n) < 10 for n in speech.dictated_numbers())
+
+
+def test_nothing_dictated():
+    assert heard("Здравствуйте").dictated_numbers() == []

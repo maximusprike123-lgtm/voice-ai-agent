@@ -5,6 +5,7 @@ read-backs) and, later, text normalization before TTS can use them.
 """
 
 import re
+from dataclasses import dataclass
 from datetime import date, time
 
 WEEKDAYS_RU = (
@@ -355,47 +356,72 @@ def longest_number_run(text: str) -> int:
     return longest
 
 
-_WORD_OR_DIGITS_RE = re.compile(r"\d+|[а-яёА-ЯЁ]+")
+_WORD_OR_DIGITS_RE = re.compile(r"\d+|[а-яёА-ЯЁa-zA-Z]+")
 
 
-def spoken_digits(text: str) -> str:
-    """The digits a person said in `text`, as one string. Written digits are kept as they are;
-    number words are turned into digits, with the way numbers are dictated in Russian: single
+@dataclass(frozen=True)
+class DigitRun:
+    """Digits said one after another: no other word between them (separators and number words
+    do not break a run)."""
+
+    digits: str
+    at_start: bool  # no other word before it in the text
+    at_end: bool  # no other word after it in the text
+
+
+def spoken_digit_runs(text: str) -> list[DigitRun]:
+    """The runs of digits a person said in `text`, in order. Written digits are kept as they
+    are; number words are turned into digits, the way numbers are dictated in Russian: single
     digits ('восемь девять один' -> '891') and groups of hundreds, tens and units
-    ('девятьсот шестнадцать' -> '916', 'сорок пять' -> '45', 'девятьсот пять' -> '905').
-    Everything else is skipped, and separators do not matter ('+7 (916) 123-45-67' ->
-    '79161234567'). Not understood: colloquial forms such as «двойка» or «две девятки»."""
-    out: list[str] = []
+    ('девятьсот шестнадцать' -> '916', 'сорок пять' -> '45', 'девятьсот пять' -> '905'). Any
+    other word ends a run ('в 14:00 номер 8 916' -> '1400', '8916'), separators do not
+    ('+7 (916) 123-45-67' -> '79161234567'). Not understood: colloquial forms such as «двойка»
+    or «две девятки»."""
+    runs: list[DigitRun] = []
+    current: list[str] = []  # the pieces of the open run
     group: int | None = None  # the numeral being built: hundreds, then tens/teens, then units
     last_kind = ""
+    seen_word = False
+    starts_text = False  # the open run began before any other word
 
     def flush() -> None:
         nonlocal group, last_kind
         if group is not None:
-            out.append(str(group))
+            current.append(str(group))
         group, last_kind = None, ""
+
+    def close(at_end: bool) -> None:
+        flush()
+        if current:
+            runs.append(DigitRun("".join(current), starts_text, at_end))
+            current.clear()
+
+    def opening() -> None:
+        nonlocal starts_text
+        if not current and group is None:
+            starts_text = not seen_word
 
     for token in _WORD_OR_DIGITS_RE.findall(text):
         if token.isdigit():
+            opening()
             flush()
-            out.append(token)
+            current.append(token)
             continue
-        value = _NUMBER_WORDS.get(_norm(token))
+        norm = _norm(token)
+        value = _NUMBER_WORDS.get(norm)
         if value is None:
-            flush()
+            if norm != "плюс":
+                close(at_end=False)
+                seen_word = True
         elif value == 0:
+            opening()
             flush()
-            out.append("0")
+            current.append("0")
         else:
-            kind = (
-                "unit"
-                if value < 10
-                else "teen"
-                if value < 20
-                else "tens"
-                if value < 100
-                else "hundreds"
-            )
+            opening()
+            kind = "unit" if value < 10 else "teen" if value < 20 else "tens"
+            if value >= 100:
+                kind = "hundreds"
             can_extend = (
                 (kind == "hundreds" and group is None)
                 or (kind in ("tens", "teen") and last_kind == "hundreds")
@@ -405,5 +431,10 @@ def spoken_digits(text: str) -> str:
                 flush()
             group = (group or 0) + value
             last_kind = kind
-    flush()
-    return "".join(out)
+    close(at_end=True)
+    return runs
+
+
+def spoken_digits(text: str) -> str:
+    """All the digits a person said in `text` as one string (see `spoken_digit_runs`)."""
+    return "".join(run.digits for run in spoken_digit_runs(text))

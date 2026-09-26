@@ -238,3 +238,19 @@ model to ask the caller; the name is refused once. `take_message` never loses a 
 `car`/`service`/dates. Tests: `tests/test_grounding.py`, new cases in test_tools / test_dialogue /
 test_ru_words / test_text_guard; existing tests now feed the caller's words to the registry.
 
+## Step 1.12 (2026-09-26): the caller ID vs a number the caller dictated
+
+Decisions (plan approved as written): (1) `ru_words.spoken_digit_runs()` returns the runs of digits
+(any other word ends a run; separators and number words do not; each run knows whether it touches the
+start / end of the utterance) and `spoken_digits()` is now its join. (2) `CallerSpeech` keeps every run
+and, when a run ends one utterance and another starts the next, also the joined run (the STT cuts
+dictation at pauses); a time at the end of one line must not swallow a number at the start of the
+next, so the pieces are kept too. (3) `ToolRegistry`: if the model passes the caller ID and the LAST
+full number the caller dictated is another one, «ОШИБКА: клиент называл другой номер», once per
+dictated number (same rule as the name: a repeat after the caller spoke again is accepted, a repeat in
+the same turn is refused); no digits in the error text. Applies to `prepare_booking` and
+`take_message`; not to a hidden caller ID. (4) New eval scenario `dictates_other_number`
+(evals/scenarios.py, cost table, ideal-run test). Result: docs/evals.md (Step 1.12 sweep): the scenario
+does not trigger the old failure, the rule fired twice and was correct, the earlier «failures» were an
+eval artifact.
+

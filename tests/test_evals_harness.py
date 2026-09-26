@@ -993,7 +993,9 @@ def test_the_default_caller_is_the_best_calibrated_model():
 def test_the_default_sweep_estimate_matches_the_measured_cost_of_the_baseline():
     """50 runs cost $0.156 at these prices (2026-09-25); the estimate must stay within ~15%."""
     prices = {"agent": (0.15, 0.6), "caller": (0.1, 0.4)}
-    estimate = estimate_cost([s.id for s in SCENARIOS for _ in range(5)], prices)
+    # the 10 scenarios of that baseline sweep; dictates_other_number was added later (step 1.12)
+    baseline = [s.id for s in SCENARIOS if s.id != "dictates_other_number"]
+    estimate = estimate_cost([sid for sid in baseline for _ in range(5)], prices)
     assert 0.156 * 0.85 < estimate < 0.156 * 1.15
 
 
