@@ -21,6 +21,9 @@ Details live in `docs/` (read the relevant file before working on that area):
   ahead to a later step without asking.
 - **Don't touch unrelated files.** A step's edits should stay scoped to what that step needs.
 - Every step ends with passing tests (`pytest`) and a clean lint (`ruff check .`).
+- **Language:** talk to me in Russian. Code, code comments, CLAUDE.md and `docs/` stay in English.
+- **End of a step:** in CLAUDE.md update only the status and one or two lines; write the
+  details into the relevant file in `docs/`.
 
 ## Architecture decisions (one line each; full text and measurements in docs/decisions.md)
 
